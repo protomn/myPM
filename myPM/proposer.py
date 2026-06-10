@@ -1,18 +1,25 @@
 """The capture proposer: turns a raw Observation into a proposed typed node.
 
-This is the one seam where the agent layer (step 7) plugs in. Deciding a raw
-remark's TYPE and extracting its semantic fields is reasoning work that belongs
-to the Reflection Analyst. Until that exists, RuleProposer does it deterministically
-from explicit structure the engineer supplied at capture plus light heuristics.
+This is the one seam where the agent layer plugs in. Deciding a raw remark's
+TYPE and extracting its semantic fields is reasoning work that belongs to the
+Reflection Analyst (docs/agents/reflection-analyst.md). Two proposers implement
+the same `.propose(obs) -> dict` contract:
 
-It is a placeholder, not a mock: it runs, it is deterministic, and it derives
-real output from real input. Swap in LLMProposer(observation) -> proposal later
-and nothing else in the pipeline changes.
+  - RuleProposer  — deterministic typing + field fill from explicit capture
+    structure plus light heuristics. Always available, offline, free.
+  - LLMProposer   — types and extracts fields with Claude when the optional
+    integration is configured. Falls back through `get_proposer()` to the rule
+    proposer when no key/dependency is present.
+
+Nothing else in the pipeline changes between the two — reflect() asks the
+factory for whichever is available.
 """
 
 from __future__ import annotations
 
 import re
+
+from .schemas import SCHEMAS, ENTITY_TYPES
 
 # Sources that, by their ceremony, tend to produce empirical findings (Lessons).
 _FINDING_SOURCES = {"benchmark", "incident", "conversation"}
@@ -69,3 +76,102 @@ class RuleProposer:
             "body": p.get("body") or obs.text.strip(),
             "confidence": p.get("confidence", "medium"),
         }
+
+
+# Types the proposer may assign. `project` is excluded: project nodes are created
+# by `mypm init`, never typed from an inbox observation.
+_TYPEABLE = tuple(t for t in ENTITY_TYPES if t != "project")
+
+_SYSTEM = """You are the Reflection Analyst's Gate-1 typer for myPM, a typed
+engineering knowledge graph. Given one raw observation, decide which single
+entity type it is and extract the minimal structured fields that type requires.
+
+The six types (pick exactly one of the typeable five):
+- component  — descriptive: a thing that exists and how it's wired
+- decision   — a recorded choice and its rationale (fields: context, choice, alternatives, rationale, consequences)
+- pattern    — a prescriptive, reusable rule (fields: applicability, solution, example)
+- lesson     — empirical learning, often corrective (fields: trigger, root_cause, takeaway)
+- preference — a standing subjective default (fields: statement, strength)
+
+Rules:
+- Fill only fields that the observation actually supports. Never invent a
+  root_cause, rationale, or evidence the text does not contain — leaving a field
+  empty is correct and lets the human supply it later.
+- Write a short, specific title and 3-5 lowercase tags.
+- Return the structured object only."""
+
+
+def _proposal_schema():
+    """A json_schema covering the union of entity fields. The model fills the
+    ones relevant to the type it picks; propose() keeps only the valid ones."""
+    field_names = set()
+    for s in SCHEMAS.values():
+        field_names |= set(s["fields"].keys())
+    props = {
+        "type": {"type": "string", "enum": list(_TYPEABLE)},
+        "title": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "body": {"type": "string"},
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+    }
+    for f in sorted(field_names):
+        props[f] = ({"type": "array", "items": {"type": "string"}}
+                    if f == "alternatives" else {"type": "string"})
+    return {"type": "object", "properties": props,
+            "required": ["type", "title"], "additionalProperties": False}
+
+
+class LLMProposer:
+    """Types an observation with Claude. Honors explicit capture structure (so a
+    fully-specified `mypm capture --type ... --field ...` needs no API call), and
+    keeps every engineer-supplied value over the model's."""
+
+    name = "llm"
+
+    def __init__(self, client=None):
+        self._client = client  # injectable; lazily constructed on first use
+
+    def _client_or_default(self):
+        if self._client is None:
+            from .claude import ClaudeClient
+            self._client = ClaudeClient()
+        return self._client
+
+    def propose(self, obs) -> dict:
+        explicit = dict(obs.proposed or {})
+        # If the engineer already typed and filled it at capture, trust that and
+        # skip the model entirely (RuleProposer honors the same explicit structure).
+        if explicit.get("type") and (explicit.get("fields") or {}):
+            return RuleProposer().propose(obs)
+
+        raw = self._client_or_default().extract(
+            system=_SYSTEM, user=f"Observation (source: {obs.source}):\n{obs.text}",
+            schema=_proposal_schema())
+
+        node_type = raw.get("type") if raw.get("type") in SCHEMAS else "lesson"
+        schema = SCHEMAS[node_type]
+        fields = {f: raw[f] for f in schema["fields"] if raw.get(f)}
+        fields.update(explicit.get("fields") or {})       # engineer's fields win
+
+        return {
+            "type": node_type,
+            "title": explicit.get("title") or raw.get("title") or obs.text.strip()[:80],
+            "id": explicit.get("id"),
+            "slug": explicit.get("slug"),
+            "tags": explicit.get("tags") or raw.get("tags") or _keywords(obs.text),
+            "fields": fields,
+            "links": explicit.get("links", []),
+            "body": explicit.get("body") or raw.get("body") or obs.text.strip(),
+            "confidence": explicit.get("confidence") or raw.get("confidence", "medium"),
+        }
+
+
+def get_proposer(prefer_llm: bool = True):
+    """Return the LLM proposer when the integration is available, else the rule
+    proposer. The single decision point reflect() uses, so the rest of the
+    pipeline never needs to know which one ran."""
+    if prefer_llm:
+        from . import claude
+        if claude.available():
+            return LLMProposer()
+    return RuleProposer()

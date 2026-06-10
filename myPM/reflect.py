@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from .schemas import SCHEMAS
 from .models import Node, make_node_id, now_iso
-from .proposer import RuleProposer
+from .proposer import get_proposer
 
 # Evaluative words that, alone, signal a "mood" rather than a fact.
 _MOOD_ONLY = re.compile(r"^\W*(it'?s |this is )?(so |really |very )?"
@@ -60,7 +60,7 @@ def _future_recall_test(obs, proposal):
 
 
 def reflect(store, proposer=None, dedupe_against=None):
-    proposer = proposer or RuleProposer()
+    proposer = proposer or get_proposer()
     existing_ids = set(dedupe_against or store.nodes_by_id().keys())
     results = []
 

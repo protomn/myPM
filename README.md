@@ -95,6 +95,13 @@ The index at `knowledge/.index/` is a derived SQLite cache — gitignored, rebui
 pip install mypm
 ```
 
+Optional extras enable the v0.2 reasoning layer (both degrade gracefully if absent):
+
+```bash
+pip install 'mypm[semantic]'   # local embeddings for semantic retrieval
+pip install 'mypm[ai]'         # Claude integration (LLM proposer + council)
+```
+
 Initialize any git repository:
 
 ```bash
@@ -146,7 +153,25 @@ mypm retrieve \
   --project your-project
 ```
 
-Returns a JSON ContextBundle: the relevant nodes, their types, why each was included, and any flagged conflicts. Feed this to whatever model you are working with.
+Returns a JSON ContextBundle: the relevant nodes, their types, why each was included, and any flagged conflicts. Feed this to whatever model you are working with. Pass `--agent <role>` (research, principal, adversarial, performance, oss, reflection) to bias ranking toward that agent's declared reads.
+
+**Council** — run the agent doctrines as actual Claude calls (requires `mypm[ai]` + `ANTHROPIC_API_KEY`):
+
+```bash
+mypm council \
+  --task "add rate limiting to the public API" \
+  --project your-project \
+  --preset minimal          # principal + adversarial; also: full, decision, review, research, reflect
+```
+
+Each agent recalls its own ContextBundle, reasons under its doctrine, and produces drafts for you to author. The runner never writes active knowledge.
+
+**Auto-capture from merged PRs** — install a git hook so merges emit draft Decisions to the inbox:
+
+```bash
+mypm hook install        # drops a post-merge hook
+mypm capture-pr          # or run it manually against HEAD
+```
 
 **Validate** — run the build pass:
 
@@ -170,13 +195,13 @@ Schema validation, edge legality, referential integrity, acyclicity. Run this be
 - ✓ `mypm init` — initialize any repository with one command
 - ✓ `mypm migrate` — migrate from older `memory/` layout
 
-### v0.2 — The reasoning layer
+### v0.2 — The reasoning layer ✓
 
-- □ Claude integration — agent doctrines wired to actual API calls, not just documentation
-- □ Semantic retrieval — embedding-based seed alongside lexical
-- □ ContextBundle ranking — centrality, recency, and agent-role weighting
-- □ Git hook — auto-capture draft Decisions from merged PRs
-- □ Validator improvements — stricter duplicate detection, scope drift warnings
+- ✓ Claude integration — agent doctrines wired to actual API calls (LLM proposer + council runner), with graceful fallback to the rule-based substrate
+- ✓ Semantic retrieval — pluggable embedding-based seed alongside lexical, content-addressed cache, silent lexical fallback
+- ✓ ContextBundle ranking — relevance blended with degree-centrality, recency decay, and agent-role weighting
+- ✓ Git hook — auto-capture draft Decisions from merged PRs
+- ✓ Validator improvements — near-duplicate detection and scope-drift warnings
 
 ### v0.3 — The compounding graph
 
@@ -202,8 +227,12 @@ Schema validation, edge legality, referential integrity, acyclicity. Run this be
 
 ## Current state
 
-v0.1 is the substrate. The graph machinery works, the gates are real, the retrieval pipeline handles scope, edge expansion, and supersession resolution, and `pip install mypm && mypm init` runs cleanly in any git repository.
+v0.1 was the substrate; v0.2 is the reasoning layer on top of it. The graph machinery works, the gates are real, and the retrieval pipeline handles scope, edge expansion, and supersession resolution. `pip install mypm && mypm init` runs cleanly in any git repository.
 
-What doesn't exist yet: the Claude API integration that wires the agent doctrines in `.claude/` to actual invocations. The doctrines are complete specifications of how each agent should reason, what it reads, and what it produces — but executing them today means manually running the CLI and feeding the output to a model yourself.
+The reasoning layer is now live:
 
-That's v0.2. What exists now is a well-designed foundation, a retrieval pipeline that's useful today, and a clear path to the part that makes it feel automatic.
+- **Recall** blends a lexical seed with optional semantic embeddings, then ranks by relevance, centrality, recency, and agent-role fit.
+- **Capture** can run an LLM proposer at Gate 1 and auto-emit draft Decisions from merged PRs via a git hook.
+- **Reason** runs the agent doctrines in `.claude/` as real Claude calls — `mypm council` recalls each agent's ContextBundle, reasons under its doctrine, and returns drafts for you to author.
+
+Every AI-backed path is an optional extra that falls back to the deterministic substrate when no key or dependency is present — the files stay the database, and the system still runs offline.

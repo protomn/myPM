@@ -1,10 +1,13 @@
 """myPM command line. The architecture's verbs, made operable.
 
-    python -m mypm capture  --text "..." --source benchmark --project p --takeaway "..."
-    python -m mypm reflect   [--root memory]      # Gate 1
-    python -m mypm distill   [--root memory]      # Gate 2 (+ Gate 3 detection)
-    python -m mypm retrieve  --task "..." [--project p]
-    python -m mypm validate  [--root memory]      # the build pass
+    python -m mypm capture   --text "..." --source benchmark --project p --takeaway "..."
+    python -m mypm reflect    [--root memory]      # Gate 1 (LLM proposer if configured)
+    python -m mypm distill    [--root memory]      # Gate 2 (+ Gate 3 detection)
+    python -m mypm retrieve   --task "..." [--project p] [--agent role]
+    python -m mypm council    --task "..." [--preset minimal]   # doctrines as Claude calls
+    python -m mypm capture-pr [--commit HEAD]      # draft Decision from a merged PR
+    python -m mypm hook       install|uninstall    # post-merge auto-capture
+    python -m mypm validate   [--root memory]      # the build pass
     python -m mypm index      [--root memory]
 """
 
@@ -14,6 +17,7 @@ import argparse
 import json
 import sys
 
+from . import agents, council
 from .store import Store
 from .models import Node, Observation, now_iso, slugify
 from .reflect import reflect as run_reflect
@@ -181,7 +185,8 @@ def cmd_distill(args):
 
 def cmd_retrieve(args):
     s = _store(args)
-    bundle = run_retrieve(s, args.task, project=args.project)
+    bundle = run_retrieve(s, args.task, project=args.project, agent=args.agent,
+                          semantic_weight=args.semantic_weight)
     print(json.dumps(bundle.to_dict(), indent=2))
 
 
@@ -199,6 +204,62 @@ def cmd_validate(args):
 def cmd_index(args):
     s = _store(args)
     print("index ->", build_index(s))
+
+
+def cmd_council(args):
+    from . import claude, council
+    if not claude.available():
+        print("Claude integration unavailable. To run the council:")
+        print("  - pip install 'mypm[ai]'")
+        print("  - export ANTHROPIC_API_KEY=...   (and unset MYPM_NO_LLM if set)")
+        sys.exit(1)
+    s = _store(args)
+    try:
+        names = council.resolve_agents(args.agents, args.preset)
+    except ValueError as e:
+        print(f"error: {e}")
+        sys.exit(1)
+    print(f"council: {' -> '.join(names)}  (task: {args.task})")
+    turns = council.run_council(s, args.task, names, project=args.project)
+    for t in turns:
+        print(f"\n===== {t.agent} ({t.command}) — {t.mandate} =====\n")
+        print(t.output)
+
+
+def cmd_capture_pr(args):
+    from . import githook
+    s = _store(args)
+    project = args.project or slugify(_os.path.basename(_os.path.abspath(".")))
+    path = githook.capture_pr(s, project=project, commit=args.commit,
+                              allow_plain=args.any_merge)
+    if path:
+        print(f"captured draft Decision from merge -> {path}")
+        print("next: mypm reflect   # Gate 1: type it into a draft")
+    elif not args.quiet:
+        print(f"no PR merge at {args.commit}; nothing captured")
+
+
+def cmd_hook(args):
+    from . import githook
+    repo = githook.repo_root() or _os.path.abspath(".")
+    if args.action == "install":
+        try:
+            path, action = githook.install_hook(repo, args.root, force=args.force)
+        except ValueError as e:
+            print(f"error: {e}")
+            sys.exit(1)
+        if action == "skipped":
+            print(f"a post-merge hook already exists and is not myPM's: {path}")
+            print("re-run with --force to replace it")
+            sys.exit(1)
+        print(f"{action}       -> {path}")
+        print("merges into this repo will now capture draft Decisions to the inbox")
+    else:  # uninstall
+        result = githook.uninstall_hook(repo)
+        msg = {"removed": "removed post-merge hook",
+               "absent": "no post-merge hook to remove",
+               "foreign": "post-merge hook is not myPM's; left untouched"}[result]
+        print(msg)
 
 
 def cmd_migrate(args):
@@ -279,6 +340,10 @@ def build_parser():
     r = sub.add_parser("retrieve", help="assemble a ContextBundle for a task")
     r.add_argument("--task", required=True)
     r.add_argument("--project", default=None)
+    r.add_argument("--agent", default=None, choices=agents.AGENT_NAMES,
+                   help="bias ranking toward this agent's declared reads")
+    r.add_argument("--semantic-weight", dest="semantic_weight", type=float, default=None,
+                   help="semantic share of the seed blend, 0-1 (default: lexical-first 0.2)")
     r.set_defaults(func=cmd_retrieve)
 
     sub.add_parser("validate", help="run the build pass").set_defaults(func=cmd_validate)
@@ -292,6 +357,30 @@ def build_parser():
     i.add_argument("--description", default=None,
                    help="one-line project description")
     i.set_defaults(func=cmd_init)
+
+    co = sub.add_parser("council", help="run agent doctrines as Claude calls (needs ANTHROPIC_API_KEY)")
+    co.add_argument("--task", required=True)
+    co.add_argument("--project", default=None)
+    co.add_argument("--agents", default=None,
+                    help="comma-separated agent names (overrides --preset)")
+    co.add_argument("--preset", default=None, choices=sorted(council.PRESETS),
+                    help=f"agent assembly (default: {council.DEFAULT_PRESET})")
+    co.set_defaults(func=cmd_council)
+
+    cp = sub.add_parser("capture-pr", help="capture a draft Decision from a merged PR")
+    cp.add_argument("--project", default=None,
+                    help="project scope (default: current directory name)")
+    cp.add_argument("--commit", default="HEAD", help="commit to inspect (default: HEAD)")
+    cp.add_argument("--any-merge", action="store_true",
+                    help="also capture plain branch merges, not just PR merges")
+    cp.add_argument("--quiet", action="store_true", help="say nothing when skipping")
+    cp.set_defaults(func=cmd_capture_pr)
+
+    h = sub.add_parser("hook", help="install/remove the post-merge capture hook")
+    h.add_argument("action", choices=("install", "uninstall"))
+    h.add_argument("--force", action="store_true",
+                   help="replace an existing non-myPM post-merge hook")
+    h.set_defaults(func=cmd_hook)
 
     m = sub.add_parser("migrate", help="rename memory/ to knowledge/ (one-time migration)")
     m.add_argument("--dry-run", action="store_true",

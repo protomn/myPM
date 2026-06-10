@@ -24,6 +24,8 @@ CREATE TABLE nodes (
     head_id     TEXT,            -- living head of this node's supersession chain
     tags        TEXT,            -- json
     source      TEXT,            -- json
+    created_at  TEXT,            -- provenance + recency ranking (ranking.py)
+    updated_at  TEXT,
     body        TEXT,
     search_text TEXT
 );
@@ -78,9 +80,10 @@ def build_index(store) -> str:
     con = sqlite3.connect(store.index_path)
     con.executescript(SCHEMA_SQL)
     con.executemany(
-        "INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         [(n.id, n.type, n.title, n.scope, n.status, heads.get(n.id, n.id),
-          json.dumps(n.tags), json.dumps(n.source), n.body, n.search_text())
+          json.dumps(n.tags), json.dumps(n.source), n.created_at, n.updated_at,
+          n.body, n.search_text())
          for n in nodes],
     )
     con.executemany(

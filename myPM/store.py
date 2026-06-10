@@ -37,6 +37,8 @@ class Store:
     def edges_dir(self):     return os.path.join(self.root, "edges")
     @property
     def index_path(self):    return os.path.join(self.root, ".index", "graph.db")
+    @property
+    def embeddings_dir(self): return os.path.join(self.root, ".index", "embeddings")
 
     def project_nodes_dir(self, project_id: str):
         return os.path.join(self.projects_dir, project_id, "nodes")

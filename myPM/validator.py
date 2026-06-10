@@ -16,6 +16,14 @@ from . import constraints
 ID_RE = re.compile(r"^[a-z]+_[a-z0-9_]+$")
 EDGE_ID_RE = re.compile(r"^.+--[a-z_]+--.+$")
 
+# Two same-type nodes whose content token sets overlap by at least this much are
+# flagged as near-duplicates. Tuned to catch restatements without firing on two
+# nodes that merely share a domain vocabulary.
+DUP_SIMILARITY = 0.6
+
+_DUP_STOP = set("the a an is are was were be to of in on at for and or with this "
+                "that it its as from by we i you they our not no but if then so".split())
+
 
 @dataclass
 class Issue:
@@ -123,6 +131,81 @@ def validate_graph(nodes, edges):
     return issues
 
 
+def _content_tokens(node):
+    """Stopword-stripped token set over a node's title, body, and field values —
+    the surface a near-duplicate would restate."""
+    text = " ".join([node.title, node.body,
+                     *(str(v) for v in node.fields.values())])
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower())
+            if w not in _DUP_STOP and len(w) > 2}
+
+
+def validate_duplicates(nodes):
+    """Warn on near-duplicate live nodes of the same type (Jaccard token overlap).
+
+    Gate 1 already blocks exact id collisions; this catches the harder case of
+    the same finding restated as a second node, which Recall would surface twice.
+    A duplicate is a warning, not an error: the fix is human judgment — supersede,
+    link with relates_to, or let one evaporate — not a build failure.
+    """
+    issues = []
+    live = [n for n in nodes if n.status in ("draft", "active")]
+    by_type = {}
+    for n in live:
+        by_type.setdefault(n.type, []).append((n, _content_tokens(n)))
+    for items in by_type.values():
+        for i in range(len(items)):
+            ni, ti = items[i]
+            if not ti:
+                continue
+            for nj, tj in items[i + 1:]:
+                if not tj:
+                    continue
+                jac = len(ti & tj) / len(ti | tj)
+                if jac >= DUP_SIMILARITY:
+                    issues.append(Issue("warning", ni.id,
+                        f"near-duplicate of {nj.id} ({jac:.0%} content overlap); "
+                        f"supersede, link via relates_to, or let one evaporate"))
+    return issues
+
+
+def validate_scope_drift(nodes, edges, nodes_by_id):
+    """Warn when scope and content disagree (docs/architecture/core-model.md).
+
+    Two drift shapes:
+      - a cross-project edge — project-scoped knowledge reaching into another
+        project's private scope, which Recall (scoped to one project + global)
+        can never traverse anyway;
+      - a global node that names a specific project — knowledge filed as
+        universal that reads as belonging to one context.
+    """
+    issues = []
+    project_ids = {n.scope.split(":", 1)[1]
+                   for n in nodes if n.scope.startswith("project:")}
+
+    for e in edges:
+        frm, to = nodes_by_id.get(e.from_id), nodes_by_id.get(e.to_id)
+        if not (frm and to):
+            continue
+        if (frm.scope.startswith("project:") and to.scope.startswith("project:")
+                and frm.scope != to.scope):
+            issues.append(Issue("warning", e.id,
+                f"cross-project edge {frm.scope} -> {to.scope}; project-scoped "
+                f"knowledge should connect within a project or promote to global"))
+
+    for n in nodes:
+        if n.scope != "global":
+            continue
+        hay = n.search_text().lower()
+        for pid in project_ids:
+            if pid in hay or pid.replace("_", " ") in hay:
+                issues.append(Issue("warning", n.id,
+                    f"global node names project '{pid}'; consider scoping it to "
+                    f"project:{pid} or removing the project-specific reference"))
+                break
+    return issues
+
+
 def validate_all(store):
     """Run the full build pass over the store. Returns (errors, warnings)."""
     nodes = store.all_nodes()
@@ -134,6 +217,8 @@ def validate_all(store):
     for e in edges:
         issues += validate_edge(e, nodes_by_id)
     issues += validate_graph(nodes, edges)
+    issues += validate_duplicates(nodes)
+    issues += validate_scope_drift(nodes, edges, nodes_by_id)
     errors = [i for i in issues if i.level == "error"]
     warnings = [i for i in issues if i.level == "warning"]
     return errors, warnings

@@ -9,13 +9,21 @@ from __future__ import annotations
 
 import re
 
-from . import constraints
+from . import constraints, ranking, embeddings
 from .index import IndexReader
 from .models import ContextBundle, BundleEntry
 
 SEED_K = 8
 MAX_DEPTH = 1            # depends_on/others followed 1 hop by default
 TOKEN_BUDGET = 2000
+
+# Seed blend when a semantic embedder is enabled. myPM is lexical-first: semantic
+# is recall *rescue*, not primary retrieval. With these weights a node with any
+# lexical hit (>=0.8 * its lexical score) always outranks a purely-semantic match
+# (<=0.2), so semantic only decides ranking where lexical is weak or absent — the
+# synonym-miss case it is good at. Override per call with --semantic-weight.
+# (lexical = 1 - semantic; summing to 1 keeps combined relevance in [0,1].)
+SEMANTIC_WEIGHT = 0.2
 
 _STOP = set("the a an is are was were be to of in on at for and or with this that "
             "it its as from by we i you they our how do you".split())
@@ -41,20 +49,44 @@ def _relevance(task_tokens, row):
     return hits / (2.0 * len(task_tokens))
 
 
-def retrieve(store, task, project=None, agent_reads=None, k=SEED_K,
-             budget=TOKEN_BUDGET, max_depth=MAX_DEPTH):
+def _semantic_scores(embedder, store, task, candidates):
+    """Cosine similarity of the task against each candidate, in [0,1]. Candidate
+    vectors are content-addressed and cached on disk, so each distinct node is
+    embedded once per model (embeddings.EmbeddingCache)."""
+    cache = embeddings.EmbeddingCache(store.embeddings_dir, embedder.model_name)
+    texts = [f'{r["title"]}\n{r["search_text"] or ""}' for r in candidates]
+    node_vecs = cache.embed_cached(texts, embedder.embed)
+    qvec = embedder.embed([task])[0]            # the query is transient, not cached
+    return {r["id"]: max(0.0, embeddings.cosine(qvec, v))
+            for r, v in zip(candidates, node_vecs)}
+
+
+def retrieve(store, task, project=None, agent=None, k=SEED_K,
+             budget=TOKEN_BUDGET, max_depth=MAX_DEPTH, embedder=None,
+             semantic_weight=None):
     idx = IndexReader(store)
     try:
-        # 1 — SCOPE
+        # 1 — SCOPE. The active agent (if any) biases ranking, not membership:
+        # every in-scope type is a candidate; role-fit reweights at assembly,
+        # per docs/agents/council.md ("agent-reads biased", not filtered).
         scopes = ["global"] + ([f"project:{project}"] if project else [])
-        candidates = idx.candidates(scopes, status="active", type_in=agent_reads)
+        candidates = idx.candidates(scopes, status="active")
 
-        # 2 — SEED (lexical relevance, agent-type-biased via candidates filter)
+        # 2 — SEED. Lexical term overlap, blended with semantic cosine when an
+        # embedder is enabled; pure lexical otherwise (v0.1 behavior). Semantic
+        # is a second entry point into the graph, never a replacement for it.
         task_tokens = _tokens(task)
-        scored = sorted(
-            ((_relevance(task_tokens, r), r) for r in candidates),
-            key=lambda x: x[0], reverse=True,
-        )
+        relevance = {r["id"]: _relevance(task_tokens, r) for r in candidates}
+        if embedder is None:
+            embedder = embeddings.load_embedder()
+        if getattr(embedder, "enabled", True) and candidates:
+            sw = SEMANTIC_WEIGHT if semantic_weight is None else semantic_weight
+            lw = 1.0 - sw
+            semantic = _semantic_scores(embedder, store, task, candidates)
+            relevance = {nid: lw * relevance[nid] + sw * semantic.get(nid, 0.0)
+                         for nid in relevance}
+        scored = sorted(((relevance[r["id"]], r) for r in candidates),
+                        key=lambda x: x[0], reverse=True)
         seeds = [(s, r) for s, r in scored if s > 0][:k]
         score_by_id = {r["id"]: s for s, r in seeds}
         in_bundle = {r["id"]: r for _, r in seeds}
@@ -93,13 +125,19 @@ def retrieve(store, task, project=None, agent_reads=None, k=SEED_K,
                         conflicts.append({"a": e["from_id"], "b": e["to_id"],
                                           "note": "flagged contradiction"})
 
-        # 5 — ASSEMBLE: rank (relevance + small centrality), fill token budget
+        # 5 — ASSEMBLE: composite rank (relevance + centrality + recency +
+        # agent role-fit), then fill the token budget in rank order.
+        degrees = {r["id"]: idx.degree(r["id"]) for r in in_bundle.values()}
+        max_degree = max(degrees.values(), default=0)
         ranked = sorted(
             in_bundle.values(),
-            key=lambda r: (score_by_id.get(r["id"], 0) + 0.05 * idx.degree(r["id"])),
+            key=lambda r: ranking.score(
+                relevance=score_by_id.get(r["id"], 0.0),
+                degree=degrees[r["id"]], max_degree=max_degree,
+                updated_at=r["updated_at"], node_type=r["type"], agent_name=agent),
             reverse=True,
         )
-        bundle = ContextBundle(scope=scopes, task=task, agent=None)
+        bundle = ContextBundle(scope=scopes, task=task, agent=agent)
         used = 0
         followups = []
         for r in ranked:

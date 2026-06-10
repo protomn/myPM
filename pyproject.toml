@@ -10,6 +10,12 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["pyyaml>=6.0"]
 
+[project.optional-dependencies]
+# Local semantic retrieval (offline embeddings). Absent install => lexical seed.
+semantic = ["sentence-transformers>=2.2"]
+# Claude integration: LLM proposer + council runner. Absent install => rule-based.
+ai = ["anthropic>=0.40"]
+
 [project.scripts]
 mypm = "myPM.cli:main"
 
