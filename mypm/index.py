@@ -15,6 +15,10 @@ import sqlite3
 
 
 SCHEMA_SQL = """
+CREATE TABLE meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
 CREATE TABLE nodes (
     id          TEXT PRIMARY KEY,
     type        TEXT,
@@ -67,6 +71,25 @@ def _resolve_heads(nodes_by_id, edges):
     return heads
 
 
+def fingerprint(store) -> str:
+    """A cheap content fingerprint over the source files: count + max mtime_ns.
+
+    The files are the database of record and are hand-editable; the index must
+    notice when they change. One os.stat sweep — milliseconds at this scale."""
+    import glob as _glob
+    paths = list(store.iter_node_paths())
+    paths += _glob.glob(os.path.join(store.edges_dir, "*.yml"))
+    latest = 0
+    for p in paths:
+        try:
+            mt = os.stat(p).st_mtime_ns
+        except OSError:
+            continue
+        if mt > latest:
+            latest = mt
+    return f"{len(paths)}:{latest}"
+
+
 def build_index(store) -> str:
     nodes = store.all_nodes()
     edges = store.all_edges()
@@ -79,6 +102,7 @@ def build_index(store) -> str:
 
     con = sqlite3.connect(store.index_path)
     con.executescript(SCHEMA_SQL)
+    con.execute("INSERT INTO meta VALUES ('fingerprint', ?)", (fingerprint(store),))
     con.executemany(
         "INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         [(n.id, n.type, n.title, n.scope, n.status, heads.get(n.id, n.id),
@@ -98,10 +122,24 @@ def build_index(store) -> str:
 class IndexReader:
     def __init__(self, store):
         self.store = store
-        if not os.path.exists(store.index_path):
+        if not os.path.exists(store.index_path) or self._stale(store):
             build_index(store)
         self.con = sqlite3.connect(store.index_path)
         self.con.row_factory = sqlite3.Row
+
+    @staticmethod
+    def _stale(store) -> bool:
+        """True when the source files changed since the index was built (or the
+        index predates the meta table). Never raises — a broken index is just a
+        stale one."""
+        try:
+            con = sqlite3.connect(store.index_path)
+            row = con.execute(
+                "SELECT value FROM meta WHERE key='fingerprint'").fetchone()
+            con.close()
+        except sqlite3.Error:
+            return True
+        return row is None or row[0] != fingerprint(store)
 
     def candidates(self, scopes, status="active", type_in=None):
         q = "SELECT * FROM nodes WHERE status = ? AND scope IN (%s)" % \

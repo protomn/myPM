@@ -9,10 +9,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from myPM import claude, council, agents
-from myPM.proposer import LLMProposer, RuleProposer, get_proposer, _proposal_schema
-from myPM.store import Store
-from myPM.models import Node, Observation
+from mypm import claude, council, agents
+from mypm.proposer import LLMProposer, RuleProposer, get_proposer, _proposal_schema
+from mypm.store import Store
+from mypm.models import Node, Observation
 
 
 class FakeClient:

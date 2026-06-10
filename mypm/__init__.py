@@ -1,8 +1,11 @@
 """myPM — a persistent engineering memory and reasoning layer.
 
-Vertical Slice #1: the graph machinery, end to end. The agent layer (step 7)
-is intentionally absent; everything here is the substrate it will run on.
+The graph machinery end to end: capture -> reflect (Gate 1) -> distill/review
+(Gates 2+3) -> retrieve, with bootstrap to seed from git history and optional
+Claude/semantic upgrades that degrade to the deterministic substrate.
 """
+
+__version__ = "0.3.0"
 
 from .store import Store
 from .parser import load_node, load_edge, parse_frontmatter

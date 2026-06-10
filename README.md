@@ -92,14 +92,16 @@ The index at `knowledge/.index/` is a derived SQLite cache — gitignored, rebui
 ## Installation
 
 ```bash
-pip install mypm
+pip install mypm-cli
 ```
 
-Optional extras enable the v0.2 reasoning layer (both degrade gracefully if absent):
+(The distribution is `mypm-cli` on PyPI; the command and import package are `mypm`.)
+
+Optional extras enable the reasoning layer (both degrade gracefully if absent):
 
 ```bash
-pip install 'mypm[semantic]'   # local embeddings for semantic retrieval
-pip install 'mypm[ai]'         # Claude integration (LLM proposer + council)
+pip install 'mypm-cli[semantic]'   # local embeddings for semantic retrieval
+pip install 'mypm-cli[ai]'         # Claude integration (LLM proposer + council)
 ```
 
 Initialize any git repository:
@@ -121,6 +123,23 @@ mypm migrate
 ---
 
 ## Quick start
+
+**Bootstrap** — seed the graph from history you already have. Day-1 Recall
+should never be empty:
+
+```bash
+mypm bootstrap --limit 100 --write          # scan recent commits, preview first without --write
+mypm bootstrap --limit 100 --enrich --write # let Claude type the survivors (needs mypm[ai])
+```
+
+The extractor pre-filters chore/vague commits, types the rest by choice and
+constraint language (a merged PR becomes a draft Decision, a bugfix becomes a
+draft Lesson), and dedups every candidate against the graph *and* the other
+candidates — only what is genuinely novel reaches the inbox. A commit that
+replaces an earlier choice ("Replace Redis with NSQ") is recognized as a
+**supersession**, not a duplicate, and carries a pointer to the decision it
+probably retires. Candidates land in the inbox only; nothing becomes active
+without you.
 
 **Capture** an observation from a session, incident, or benchmark:
 
@@ -144,6 +163,24 @@ mypm reflect
 ```bash
 mypm distill
 ```
+
+**Review** — the per-draft approval surface. `distill` is batch; `review` is how
+you work through what it blocked, in seconds per item:
+
+```bash
+mypm review                                  # interactive: walk pending drafts
+mypm review list                             # what's pending and what each needs
+mypm review approve lesson_gc_pauses --field root_cause="unbounded allocations"
+mypm review reject  lesson_noise
+mypm review merge   lesson_restated --into lesson_original
+mypm review supersede decision_use_nsq --replaces decision_use_redis
+```
+
+`approve` prompts for exactly the fields Gate 2 still needs, then promotes
+through the same gate distill uses — no bypass. `supersede` wires the
+`supersedes` edge and retires the old node in one step. Observations that fail
+Gate 1 are quarantined in `inbox/held/` with their failure reasons embedded;
+edit the file and run `mypm reflect --retry-held`.
 
 **Retrieve** — assemble context for a task:
 
@@ -203,11 +240,20 @@ Schema validation, edge legality, referential integrity, acyclicity. Run this be
 - ✓ Git hook — auto-capture draft Decisions from merged PRs
 - ✓ Validator improvements — near-duplicate detection and scope-drift warnings
 
-### v0.3 — The compounding graph
+### v0.3 — The extraction core ✓
 
+- ✓ `mypm bootstrap` — seed the graph from git history: pre-filter → rule/LLM typing → Recall-as-dedup-filter → inbox candidates (never auto-promoted)
+- ✓ Supersession-aware dedup — "Replace X with Y" is recognized as a successor to "Use X", not a duplicate
+- ✓ `mypm review` — the approval surface: approve / reject / merge-into / supersede, per draft, through the same Gate 2 distill runs
+- ✓ Gate-1 quarantine — failing observations move to `inbox/held/` with reasons; no re-processing, no re-billing
+- ✓ Hardening — stale-index detection, malformed-file containment, field type validation, package rename to `mypm`
+
+### v0.4 — The compounding graph
+
+- □ Live Observer — the bootstrap extractor pointed at a stream instead of history
+- □ Recall feedback — one-key "was this useful?" on retrieve output (the Recall Win Rate KPI)
 - □ Multi-repository knowledge — unified graph across multiple codebases
 - □ Graph visualization — dependency chains, supersession history, conflict map
-- □ Learning analytics — recall precision, cross-project reuse rate, pattern emergence rate
 
 ---
 
@@ -227,12 +273,16 @@ Schema validation, edge legality, referential integrity, acyclicity. Run this be
 
 ## Current state
 
-v0.1 was the substrate; v0.2 is the reasoning layer on top of it. The graph machinery works, the gates are real, and the retrieval pipeline handles scope, edge expansion, and supersession resolution. `pip install mypm && mypm init` runs cleanly in any git repository.
+v0.1 was the substrate, v0.2 the reasoning layer, v0.3 the extraction core and
+the approval surface. The full loop now closes end to end: `mypm bootstrap`
+seeds candidates from history you already have, the gates hold them to the same
+standard as manual capture, `mypm review` is how a human moves them through
+Gate 2 in seconds per item, and `mypm retrieve` recalls the result. Day-1 is
+not empty, and nothing enters the active graph without an author.
 
-The reasoning layer is now live:
-
-- **Recall** blends a lexical seed with optional semantic embeddings, then ranks by relevance, centrality, recency, and agent-role fit.
-- **Capture** can run an LLM proposer at Gate 1 and auto-emit draft Decisions from merged PRs via a git hook.
+- **Recall** blends a lexical seed with optional semantic embeddings, then ranks by relevance, centrality, recency, and agent-role fit. The index detects when files changed under it and rebuilds itself.
+- **Capture** is abundant: bootstrap over git history, a post-merge hook for PRs, an LLM proposer at Gate 1 — all landing in the inbox, never in the graph.
+- **Promotion** is scarce: Gate 2 demands substantiation and a graph link, and `mypm review` is the human's tool for supplying exactly what's missing.
 - **Reason** runs the agent doctrines in `.claude/` as real Claude calls — `mypm council` recalls each agent's ContextBundle, reasons under its doctrine, and returns drafts for you to author.
 
 Every AI-backed path is an optional extra that falls back to the deterministic substrate when no key or dependency is present — the files stay the database, and the system still runs offline.

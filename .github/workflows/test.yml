@@ -1,0 +1,34 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu is the case-sensitive-filesystem canary for the package name;
+        # macos mirrors the primary dev environment
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: pip install .
+
+      - name: Smoke test the installed CLI
+        run: |
+          mypm --version
+          python -m mypm --version
+          mypm --help > /dev/null
+
+      - name: Run the test suite
+        run: python tests/run_all.py

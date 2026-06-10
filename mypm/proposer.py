@@ -82,31 +82,65 @@ class RuleProposer:
 # by `mypm init`, never typed from an inbox observation.
 _TYPEABLE = tuple(t for t in ENTITY_TYPES if t != "project")
 
-_SYSTEM = """You are the Reflection Analyst's Gate-1 typer for myPM, a typed
+# One-line cognitive description per typeable entity; the field lists themselves
+# are generated from SCHEMAS below so the prompt can never drift from the gates.
+_TYPE_NOTES = {
+    "component": "descriptive: a thing that exists and how it's wired",
+    "decision": "a recorded intentional choice and its rationale",
+    "pattern": "a prescriptive, reusable rule",
+    "lesson": "empirical learning, often corrective",
+    "preference": "a standing subjective default",
+}
+
+_FIELD_HINTS = {
+    "kind": "one of: service | module | datastore | interface | dependency | infra",
+    "strength": "one of: strong | weak | default",
+}
+
+
+def _system_prompt():
+    lines = []
+    for t in _TYPEABLE:
+        s = SCHEMAS[t]
+        fields = ", ".join(s["fields"].keys())
+        required = ", ".join(s["required_draft"]) or "none"
+        lines.append(f"- {t} — {_TYPE_NOTES.get(t, t)}\n"
+                     f"  fields: {fields}\n"
+                     f"  REQUIRED (the draft is rejected without these): {required}")
+    hints = "\n".join(f"- {k}: {v}" for k, v in _FIELD_HINTS.items())
+    return f"""You are the Reflection Analyst's Gate-1 typer for myPM, a typed
 engineering knowledge graph. Given one raw observation, decide which single
 entity type it is and extract the minimal structured fields that type requires.
 
-The six types (pick exactly one of the typeable five):
-- component  — descriptive: a thing that exists and how it's wired
-- decision   — a recorded choice and its rationale (fields: context, choice, alternatives, rationale, consequences)
-- pattern    — a prescriptive, reusable rule (fields: applicability, solution, example)
-- lesson     — empirical learning, often corrective (fields: trigger, root_cause, takeaway)
-- preference — a standing subjective default (fields: statement, strength)
+The typeable entity types (pick exactly one):
+{chr(10).join(lines)}
+
+Field value hints:
+{hints}
 
 Rules:
-- Fill only fields that the observation actually supports. Never invent a
-  root_cause, rationale, or evidence the text does not contain — leaving a field
-  empty is correct and lets the human supply it later.
+- ALWAYS fill every REQUIRED field for the type you pick — derive it from the
+  observation text. If you cannot honestly fill a required field, pick a type
+  whose required fields the observation does support.
+- Beyond required fields, fill only what the observation actually supports.
+  Never invent a root_cause, rationale, or evidence the text does not contain —
+  leaving an optional field empty is correct and lets the human supply it later.
 - Write a short, specific title and 3-5 lowercase tags.
 - Return the structured object only."""
 
 
+_SYSTEM = _system_prompt()
+
+
 def _proposal_schema():
-    """A json_schema covering the union of entity fields. The model fills the
-    ones relevant to the type it picks; propose() keeps only the valid ones."""
+    """A json_schema covering the union of fields across the TYPEABLE entities
+    (project is excluded — it isn't typed from observations). The model fills the
+    ones relevant to the type it picks; propose() keeps only the valid ones.
+    Restricting to typeable types also keeps the optional-parameter count under
+    the API's structured-output limit (24)."""
     field_names = set()
-    for s in SCHEMAS.values():
-        field_names |= set(s["fields"].keys())
+    for t in _TYPEABLE:
+        field_names |= set(SCHEMAS[t]["fields"].keys())
     props = {
         "type": {"type": "string", "enum": list(_TYPEABLE)},
         "title": {"type": "string"},
@@ -128,13 +162,14 @@ class LLMProposer:
 
     name = "llm"
 
-    def __init__(self, client=None):
+    def __init__(self, client=None, model=None):
         self._client = client  # injectable; lazily constructed on first use
+        self._model = model    # explicit model beats MYPM_CLAUDE_MODEL/default
 
     def _client_or_default(self):
         if self._client is None:
             from .claude import ClaudeClient
-            self._client = ClaudeClient()
+            self._client = ClaudeClient(model=self._model)
         return self._client
 
     def propose(self, obs) -> dict:
@@ -166,12 +201,12 @@ class LLMProposer:
         }
 
 
-def get_proposer(prefer_llm: bool = True):
+def get_proposer(prefer_llm: bool = True, model=None):
     """Return the LLM proposer when the integration is available, else the rule
     proposer. The single decision point reflect() uses, so the rest of the
     pipeline never needs to know which one ran."""
     if prefer_llm:
         from . import claude
         if claude.available():
-            return LLMProposer()
+            return LLMProposer(model=model)
     return RuleProposer()

@@ -14,10 +14,14 @@ mypm retrieve --task "<describe the task>" --project <project-id>
 ## Commands
 
 ```
+mypm bootstrap --limit 100 --write          seed candidates from git history (dedup vs the graph)
 mypm capture --text "..." --project <id>   record a raw observation
-mypm reflect                                Gate 1: type observations into draft nodes
+mypm reflect [--retry-held]                 Gate 1: type observations into draft nodes
 mypm distill                                Gates 2+3: promote drafts, wire edges, rebuild index
+mypm review [list|approve|reject|merge|supersede]   per-draft approval surface
 mypm retrieve --task "..." --project <id>  recall context for a task
+mypm council --task "..."                   run agent doctrines as Claude calls
+mypm hook install                           auto-capture draft Decisions from merged PRs
 mypm validate                               run the build/lint pass
 ```
 

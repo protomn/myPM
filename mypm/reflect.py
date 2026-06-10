@@ -28,6 +28,7 @@ class Gate1Result:
     admitted: bool
     node_id: str | None
     reasons: list
+    held_path: str | None = None     # where a failing observation was quarantined
 
 
 def _future_recall_test(obs, proposal):
@@ -59,10 +60,13 @@ def _future_recall_test(obs, proposal):
     return ok, reasons
 
 
-def reflect(store, proposer=None, dedupe_against=None):
+def reflect(store, proposer=None, dedupe_against=None, retry_held=False):
     proposer = proposer or get_proposer()
     existing_ids = set(dedupe_against or store.nodes_by_id().keys())
     results = []
+
+    if retry_held:
+        store.release_held()
 
     for obs, path in store.all_observations():
         proposal = proposer.propose(obs)
@@ -79,7 +83,10 @@ def reflect(store, proposer=None, dedupe_against=None):
             reasons.append("ok non-redundant")
 
         if not ok:
-            results.append(Gate1Result(obs.id, False, None, reasons))
+            # quarantine: stop re-processing (and re-billing) this observation
+            # on every run; the engineer edits it and uses --retry-held
+            held = store.hold_observation(obs, path, reasons)
+            results.append(Gate1Result(obs.id, False, None, reasons, held))
             continue
 
         scope = f"project:{obs.project}" if obs.project else "global"

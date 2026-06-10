@@ -8,10 +8,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from myPM import githook
-from myPM.reflect import reflect
-from myPM.distill import distill
-from myPM.store import Store
+from mypm import githook
+from mypm.reflect import reflect
+from mypm.distill import distill
+from mypm.store import Store
 
 
 # ---- unit: parse_merge --------------------------------------------------

@@ -10,10 +10,10 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from myPM import agents, ranking
-from myPM.store import Store
-from myPM.models import Node
-from myPM.retriever import retrieve
+from mypm import agents, ranking
+from mypm.store import Store
+from mypm.models import Node
+from mypm.retriever import retrieve
 
 
 # ---- unit: recency ------------------------------------------------------

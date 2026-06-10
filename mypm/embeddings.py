@@ -11,8 +11,8 @@ expansion and ranking do the real work. Retrieval never becomes "semantic search
 
 Three design commitments hold this in place:
 
-1. **Optional, silent fallback.** `pip install mypm` stays clean. The embedder is
-   an extra (`mypm[semantic]`); when it (or torch/numpy) is absent, retrieval
+1. **Optional, silent fallback.** `pip install mypm-cli` stays clean. The embedder is
+   an extra (`mypm-cli[semantic]`); when it (or torch/numpy) is absent, retrieval
    falls back to the lexical seed with no warning, no error, no degraded UX.
 2. **Content-addressed, file-backed cache.** Each vector is a JSON file named
    `sha256(model + "\\n" + text)` under `knowledge/.index/embeddings/`. Edits and
@@ -92,10 +92,17 @@ class NullEmbedder(Embedder):
         return [[] for _ in texts]
 
 
+# Process-level memo: retrieve() asks for an embedder on every call, and a
+# LocalEmbedder holds a loaded model (seconds to construct). One per model name
+# per process; a council run reuses it across every agent's recall.
+_EMBEDDERS: dict = {}
+
+
 def load_embedder(env=None) -> Embedder:
     """Return the active embedder — `LocalEmbedder` when the optional dependency
     is installed and not opted out, else `NullEmbedder`. Never raises, never
-    returns None; a missing install is a fallback, not an error.
+    returns None; a missing install is a fallback, not an error. Instances are
+    memoized per model so the underlying model loads once per process.
 
     MYPM_NO_SEMANTIC opts out; MYPM_EMBED_MODEL overrides the local model.
     """
@@ -106,7 +113,10 @@ def load_embedder(env=None) -> Embedder:
         import sentence_transformers  # noqa: F401  (probe only)
     except ImportError:
         return NullEmbedder()
-    return LocalEmbedder(env.get("MYPM_EMBED_MODEL", DEFAULT_MODEL))
+    model = env.get("MYPM_EMBED_MODEL", DEFAULT_MODEL)
+    if model not in _EMBEDDERS:
+        _EMBEDDERS[model] = LocalEmbedder(model)
+    return _EMBEDDERS[model]
 
 
 # ---- content-addressed file cache ---------------------------------------

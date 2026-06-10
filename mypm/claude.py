@@ -45,26 +45,41 @@ class ClaudeClient:
         self.model = model or env.get("MYPM_CLAUDE_MODEL", DEFAULT_MODEL)
         self._client = anthropic.Anthropic()
 
+    def _reasoning_params(self) -> dict:
+        """Thinking/effort parameters the active model actually supports.
+
+        Adaptive thinking and the effort parameter exist on Sonnet 4.6+, Opus
+        4.6+, and Fable; Haiku supports neither and 400s if they are sent. The
+        check is a denylist on haiku so future top-tier models default to the
+        full reasoning surface."""
+        if "haiku" in self.model:
+            return {}
+        return {"thinking": {"type": "adaptive"},
+                "output_config": {"effort": "high"}}
+
     def complete(self, system: str, user: str, max_tokens: int = 12000) -> str:
-        """Reasoned free-text completion (council agents). Adaptive thinking on."""
+        """Reasoned free-text completion (council agents)."""
         msg = self._client.messages.create(
             model=self.model, max_tokens=max_tokens,
-            thinking={"type": "adaptive"},
-            output_config={"effort": "high"},
             system=system,
             messages=[{"role": "user", "content": user}],
+            **self._reasoning_params(),
         )
         return "".join(b.text for b in msg.content if b.type == "text").strip()
 
     def extract(self, system: str, user: str, schema: dict,
                 max_tokens: int = 2048) -> dict:
-        """Schema-constrained JSON extraction (LLMProposer typing). No thinking —
-        this is a classification/extraction task, not a reasoning one."""
+        """Prompt-directed JSON extraction (LLMProposer typing). No structured
+        output constraint — grammar compilation times out on complex schemas.
+        Model is instructed to return a bare JSON object; we strip any fences."""
         msg = self._client.messages.create(
             model=self.model, max_tokens=max_tokens,
             system=system,
-            messages=[{"role": "user", "content": user}],
-            output_config={"format": {"type": "json_schema", "schema": schema}},
+            messages=[{"role": "user", "content": user + "\n\nReturn only a valid JSON object, no markdown fences, no explanation."}],
         )
-        text = next(b.text for b in msg.content if b.type == "text")
+        text = next(b.text for b in msg.content if b.type == "text").strip()
+        # Strip optional ```json ... ``` or ``` ... ``` fences
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+            text = text.rsplit("```", 1)[0].strip()
         return json.loads(text)

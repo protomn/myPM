@@ -10,9 +10,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from myPM import validator
-from myPM.store import Store
-from myPM.models import Node, Edge, make_edge_id
+from mypm import validator
+from mypm.store import Store
+from mypm.models import Node, Edge, make_edge_id
 
 
 def _lesson(node_id, title, body, scope="global"):

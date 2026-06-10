@@ -71,10 +71,16 @@ def validate_node(node, store=None):
             gate = "Gate 2 (active)" if fld in schema["required_active"] else "Gate 1 (draft)"
             issues.append(Issue("error", node.id, f"missing required field '{fld}' for {gate}"))
 
-    # unknown entity fields
-    for fld in node.fields:
+    # unknown entity fields + declared-type mismatches (the schemas carry python
+    # types — str/list/bool — so a string where a list belongs is caught here;
+    # warning level because legacy graphs may predate the check)
+    for fld, val in node.fields.items():
         if fld not in schema["fields"]:
             issues.append(Issue("warning", node.id, f"unknown field '{fld}' for {node.type}"))
+        elif val is not None and not isinstance(val, schema["fields"][fld]):
+            issues.append(Issue("warning", node.id,
+                f"field '{fld}' should be {schema['fields'][fld].__name__}, "
+                f"got {type(val).__name__}"))
     return issues
 
 
@@ -207,11 +213,23 @@ def validate_scope_drift(nodes, edges, nodes_by_id):
 
 
 def validate_all(store):
-    """Run the full build pass over the store. Returns (errors, warnings)."""
-    nodes = store.all_nodes()
-    edges = store.all_edges()
+    """Run the full build pass over the store. Returns (errors, warnings).
+
+    A malformed file is reported as an error on that file, never a crash of the
+    whole pass — the files are hand-editable, so the build must survive a typo."""
+    nodes, edges, issues = [], [], []
+    for p in store.iter_node_paths():
+        try:
+            nodes.append(store.load_node(p))
+        except Exception as e:
+            issues.append(Issue("error", p, str(e)))
+    import glob as _glob, os as _os
+    for p in _glob.glob(_os.path.join(store.edges_dir, "*.yml")):
+        try:
+            edges.append(store.load_edge(p))
+        except Exception as e:
+            issues.append(Issue("error", p, f"unparseable edge file: {e}"))
     nodes_by_id = {n.id: n for n in nodes}
-    issues = []
     for n in nodes:
         issues += validate_node(n, store)
     for e in edges:

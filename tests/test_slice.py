@@ -12,10 +12,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from myPM.store import Store
-from myPM.models import Node, Observation
-from myPM import reflect, distill, retrieve, validator, constraints
-from myPM.cli import cmd_init, cmd_migrate
+from mypm.store import Store
+from mypm.models import Node, Observation
+from mypm import reflect, distill, retrieve, validator, constraints
+from mypm.cli import cmd_init, cmd_migrate
 
 
 @contextlib.contextmanager

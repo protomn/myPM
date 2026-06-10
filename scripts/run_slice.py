@@ -19,9 +19,9 @@ import textwrap
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from myPM.store import Store
-from myPM.models import Node, Observation
-from myPM import reflect, distill, retrieve, validator
+from mypm.store import Store
+from mypm.models import Node, Observation
+from mypm import reflect, distill, retrieve, validator
 
 MEMORY = os.path.join(ROOT, "knowledge_demo")
 PROJECT = "binary_serializer"

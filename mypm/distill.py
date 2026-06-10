@@ -30,7 +30,7 @@ class DistillReport:
     build_errors: list = field(default_factory=list)
 
 
-def _gate2_check(node, nodes_by_id, proposed_links):
+def _gate2_check(node, nodes_by_id, proposed_links, real_edge_count=0):
     """Substantiation test. Returns (ok, reasons)."""
     reasons = []
     schema = SCHEMAS[node.type]
@@ -44,13 +44,74 @@ def _gate2_check(node, nodes_by_id, proposed_links):
 
     # linked: must have at least one valid (existing-target) edge, real or proposed
     valid_links = [l for l in proposed_links if l.get("to") in nodes_by_id]
-    if valid_links:
-        reasons.append(f"ok linked: {len(valid_links)} edge(s)")
+    if valid_links or real_edge_count:
+        reasons.append(f"ok linked: {len(valid_links)} proposed + "
+                       f"{real_edge_count} existing edge(s)")
     else:
         reasons.append("FAIL linked: no edge connects this node to the graph")
 
     ok = not any(r.startswith("FAIL") for r in reasons)
     return ok, reasons
+
+
+def edge_counts(edges):
+    """How many materialized edges touch each node id."""
+    counts = {}
+    for e in edges:
+        counts[e.from_id] = counts.get(e.from_id, 0) + 1
+        counts[e.to_id] = counts.get(e.to_id, 0) + 1
+    return counts
+
+
+def promote_node(store, node, nodes_by_id, real_edge_count=0, source="distill"):
+    """Run one draft through Gate 2: check, materialize links, promote.
+
+    The single promotion path shared by distill (batch) and review (per-node).
+    Returns (ok, reasons, edges_created). Nothing is written unless every
+    proposed link is legal — an illegal edge is a Gate 2 failure, not something
+    to promote past.
+    """
+    ok, reasons = _gate2_check(node, nodes_by_id, node.proposed_links,
+                               real_edge_count)
+    if not ok:
+        return False, reasons, []
+
+    illegal = []
+    materializable = []
+    for link in node.proposed_links:
+        etype, to_id = link.get("type"), link.get("to")
+        target = nodes_by_id.get(to_id)
+        if target is None:
+            continue              # dangling proposal; gate2 already ignored it
+        legal, why = constraints.is_legal_edge(etype, node.type, target.type)
+        if legal:
+            materializable.append((etype, to_id, link, target))
+        else:
+            illegal.append(f"FAIL edge: {why}")
+    if illegal:
+        return False, illegal, []
+
+    created = []
+    for etype, to_id, link, target in materializable:
+        edge = Edge(
+            id=make_edge_id(node.id, etype, to_id),
+            type=etype, from_id=node.id, to_id=to_id,
+            source={"type": source}, note=link.get("note", ""),
+        )
+        if not store.edge_exists(edge.id):
+            store.write_edge(edge)
+            created.append(edge.id)
+        # a materialized supersession retires the old node
+        if etype == "supersedes" and target.status == "active":
+            target.status = "superseded"
+            target.updated_at = now_iso()
+            store.write_node(target)
+
+    node.status = "active"
+    node.updated_at = now_iso()
+    node.proposed_links = []
+    store.write_node(node)
+    return True, reasons, created
 
 
 def distill(store):
@@ -67,40 +128,16 @@ def distill(store):
     nodes = store.all_nodes()
     nodes_by_id = {n.id: n for n in nodes}
     drafts = [n for n in nodes if n.status == "draft"]
+    real_edge_counts = edge_counts(store.all_edges())
 
     for node in drafts:
-        ok, reasons = _gate2_check(node, nodes_by_id, node.proposed_links)
-        if not ok:
+        ok, reasons, created = promote_node(store, node, nodes_by_id,
+                                            real_edge_counts.get(node.id, 0))
+        if ok:
+            report.promoted.append(node.id)
+            report.edges_created.extend(created)
+        else:
             report.blocked.append((node.id, reasons))
-            continue
-
-        # materialize proposed links into first-class edges
-        kept_links = []
-        for link in node.proposed_links:
-            etype, to_id = link.get("type"), link.get("to")
-            target = nodes_by_id.get(to_id)
-            if target is None:
-                continue
-            legal, why = constraints.is_legal_edge(etype, node.type, target.type)
-            if not legal:
-                report.blocked.append((node.id, [f"FAIL edge: {why}"]))
-                kept_links.append(link)
-                continue
-            edge = Edge(
-                id=make_edge_id(node.id, etype, to_id),
-                type=etype, from_id=node.id, to_id=to_id,
-                source={"type": "distill"}, note=link.get("note", ""),
-            )
-            if not store.edge_exists(edge.id):
-                store.write_edge(edge)
-                report.edges_created.append(edge.id)
-
-        # promote: draft -> active
-        node.status = "active"
-        node.updated_at = now_iso()
-        node.proposed_links = kept_links   # cleared unless something failed
-        store.write_node(node)
-        report.promoted.append(node.id)
 
     # Gate 3: recurrence detection across active Lessons
     report.patterns_proposed = _detect_pattern_candidates(store)
@@ -123,7 +160,9 @@ def _detect_pattern_candidates(store, min_occurrences=2, min_projects=2):
     proposals = []
     seen = set()
     for tag, group in by_tag.items():
-        projects = {l.scope for l in group}
+        # only project scopes count toward recurrence-across-contexts; a global
+        # lesson is context-free and would inflate the count
+        projects = {l.scope for l in group if l.scope.startswith("project:")}
         if len(group) >= min_occurrences and len(projects) >= min_projects:
             key = tuple(sorted(l.id for l in group))
             if key in seen:

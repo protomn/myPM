@@ -1,8 +1,9 @@
 """myPM command line. The architecture's verbs, made operable.
 
     python -m mypm capture   --text "..." --source benchmark --project p --takeaway "..."
-    python -m mypm reflect    [--root memory]      # Gate 1 (LLM proposer if configured)
+    python -m mypm reflect    [--retry-held]       # Gate 1 (LLM proposer if configured)
     python -m mypm distill    [--root memory]      # Gate 2 (+ Gate 3 detection)
+    python -m mypm review     [list|approve|reject|merge|supersede] [id]
     python -m mypm retrieve   --task "..." [--project p] [--agent role]
     python -m mypm council    --task "..." [--preset minimal]   # doctrines as Claude calls
     python -m mypm capture-pr [--commit HEAD]      # draft Decision from a merged PR
@@ -142,8 +143,12 @@ def cmd_capture(args):
         etype, _, to = ln.partition(":")
         proposed.setdefault("links", []).append({"type": etype, "to": to})
 
+    import uuid
     obs = Observation(
-        id=f"obs_{now_iso().replace(':', '').replace('-', '')[:15]}_{slugify(args.text, 3)}",
+        # timestamp for human ordering + 6 hex chars so two same-second captures
+        # with similar text can never silently overwrite each other
+        id=f"obs_{now_iso().replace(':', '').replace('-', '')[:15]}_"
+           f"{slugify(args.text, 3)}_{uuid.uuid4().hex[:6]}",
         text=args.text, source=args.source, project=args.project, proposed=proposed,
     )
     path = s.write_observation(obs)
@@ -152,15 +157,22 @@ def cmd_capture(args):
 
 def cmd_reflect(args):
     s = _store(args)
-    results = run_reflect(s)
+    results = run_reflect(s, retry_held=args.retry_held)
     if not results:
         print("inbox empty.")
         return
+    held_count = 0
     for r in results:
         head = "ADMITTED" if r.admitted else "held"
         print(f"[{head}] {r.observation_id}" + (f" -> draft {r.node_id}" if r.node_id else ""))
         for reason in r.reasons:
             print(f"    - {reason}")
+        if r.held_path:
+            held_count += 1
+            print(f"    quarantined -> {r.held_path}")
+    if held_count:
+        print(f"\n{held_count} observation(s) quarantined in inbox/held/ — edit the "
+              f"file(s), then: mypm reflect --retry-held")
 
 
 def cmd_distill(args):
@@ -206,11 +218,199 @@ def cmd_index(args):
     print("index ->", build_index(s))
 
 
+def cmd_bootstrap(args):
+    from . import bootstrap as boot
+    if args.enrich:
+        from . import claude
+        if not claude.available():
+            print("--enrich needs the Claude integration: pip install 'mypm-cli[ai]' "
+                  "and set ANTHROPIC_API_KEY (or drop --enrich for the free pass).")
+            sys.exit(1)
+    s = _store(args)
+    project = args.project
+    if args.write and not project:
+        project = slugify(_os.path.basename(_os.path.abspath(args.repo)))
+        print(f"(no --project given; defaulting to '{project}')")
+    if args.write and project and not _os.path.exists(s.project_file(project)):
+        print(f"warning: no project node for '{project}' — candidates will lack a "
+              f"graph link and stall at Gate 2. Run: mypm init --project {project}")
+    cands = boot.bootstrap(s, repo_dir=args.repo, limit=args.limit,
+                           project=project, enrich=args.enrich, write=args.write,
+                           model=args.model)
+
+    kept   = [c for c in cands if c.status == "kept"]
+    supers = [c for c in cands if c.status == "supersession"]
+    dups   = [c for c in cands if c.status == "duplicate"]
+    dropped = [c for c in cands if c.status == "dropped"]
+    written = kept + supers
+
+    def _row(c):
+        tag = {"kept": c.proposal["type"] if c.proposal else "?",
+               "supersession": c.proposal["type"] if c.proposal else "?",
+               "duplicate": "dup", "dropped": "drop"}.get(c.status, "?")
+        note = f"  ({c.reason})" if c.reason else ""
+        return f"  {c.status:12} {tag:9} {c.sha}  {c.subject[:57]}{note}"
+
+    print(f"scanned {len(cands)} commits from {args.repo}"
+          + ("  [enriched]" if args.enrich else "  [free pass]"))
+    print(f"\nCANDIDATES ({len(kept)} novel):")
+    for c in kept:
+        print(_row(c))
+    if supers:
+        print(f"\nSUPERSESSIONS ({len(supers)} — likely replace existing decisions):")
+        for c in supers:
+            print(_row(c))
+    if dups:
+        print(f"\nDEDUPED ({len(dups)} — already represented):")
+        for c in dups:
+            print(_row(c))
+    if dropped:
+        print(f"\nFILTERED ({len(dropped)} — low signal):")
+        for c in dropped:
+            print(_row(c))
+
+    print(f"\n{len(kept)} novel · {len(supers)} supersede · {len(dups)} deduped · {len(dropped)} filtered")
+    if args.write:
+        print(f"wrote {len(written)} observation(s) to the inbox; next: mypm reflect")
+    else:
+        print("(preview only — re-run with --write to land these in the inbox)")
+
+
+def _parse_fields(field_args):
+    fields = {}
+    for kv in (field_args or []):
+        k, _, v = kv.partition("=")
+        fields[k] = v
+    return fields
+
+
+def cmd_review(args):
+    from . import review
+
+    s = _store(args)
+
+    if args.action in (None, "list"):
+        drafts = review.pending(s)
+        if not drafts:
+            print("nothing pending — no drafts await review.")
+            return
+        print(f"{len(drafts)} draft(s) pending:\n")
+        for d in drafts:
+            print(f"  {d.node_id}  [{d.type}]  {d.title[:60]}")
+            needs = []
+            if d.missing_fields:
+                needs.append(f"missing fields: {', '.join(d.missing_fields)}")
+            if not d.linked:
+                needs.append("no graph link")
+            print(f"      needs: {'; '.join(needs) if needs else 'nothing — ready to approve'}")
+        if args.action is None:
+            _review_interactive(s, review, drafts)
+        else:
+            print("\napprove:   mypm review approve <id> --field root_cause='...'")
+            print("reject:    mypm review reject <id>")
+            print("merge:     mypm review merge <id> --into <existing-id>")
+            print("supersede: mypm review supersede <id> --replaces <old-id>")
+        return
+
+    if not args.node_id:
+        print(f"error: '{args.action}' needs a node id")
+        sys.exit(1)
+
+    try:
+        if args.action == "approve":
+            ok, reasons, created = review.approve(s, args.node_id,
+                                                  fields=_parse_fields(args.field))
+            if ok:
+                print(f"promoted {args.node_id} -> active")
+                for e in created:
+                    print(f"  edge: {e}")
+            else:
+                print(f"still blocked at Gate 2 (supplied fields were saved):")
+                for r in reasons:
+                    print(f"  - {r}")
+                sys.exit(1)
+        elif args.action == "reject":
+            path = review.reject(s, args.node_id)
+            print(f"rejected; removed {path}")
+        elif args.action == "merge":
+            if not args.into:
+                print("error: merge needs --into <existing-node-id>")
+                sys.exit(1)
+            target = review.merge(s, args.node_id, args.into)
+            print(f"merged {args.node_id} into {target}")
+        elif args.action == "supersede":
+            if not args.replaces:
+                print("error: supersede needs --replaces <old-node-id>")
+                sys.exit(1)
+            ok, reasons, created = review.supersede(
+                s, args.node_id, args.replaces, fields=_parse_fields(args.field))
+            if ok:
+                print(f"promoted {args.node_id}; {args.replaces} is now superseded")
+                for e in created:
+                    print(f"  edge: {e}")
+            else:
+                print("still blocked at Gate 2 (supersedes link was saved):")
+                for r in reasons:
+                    print(f"  - {r}")
+                sys.exit(1)
+    except ValueError as e:
+        print(f"error: {e}")
+        sys.exit(1)
+
+
+def _review_interactive(s, review, drafts):
+    """Walk pending drafts one at a time. Plain input(); quits cleanly on EOF."""
+    import subprocess
+
+    print("\ninteractive review — [a]pprove [r]eject [m]erge [s]upersede "
+          "[e]dit [k]skip [q]uit")
+    for d in drafts:
+        print(f"\n--- {d.node_id}  [{d.type}]")
+        print(f"    {d.title}")
+        for reason in d.reasons:
+            print(f"    {reason}")
+        try:
+            choice = input("    action [a/r/m/s/e/k/q]> ").strip().lower()
+        except EOFError:
+            return
+        if choice == "q":
+            return
+        if choice in ("", "k"):
+            continue
+        try:
+            if choice == "a":
+                fields = {}
+                for f in d.missing_fields:
+                    val = input(f"    {f} (';' separates list items)> ").strip()
+                    if val:
+                        fields[f] = val
+                ok, reasons, _ = review.approve(s, d.node_id, fields=fields)
+                print(f"    {'promoted -> active' if ok else 'still blocked: ' + '; '.join(r for r in reasons if r.startswith('FAIL'))}")
+            elif choice == "r":
+                review.reject(s, d.node_id)
+                print("    rejected")
+            elif choice == "m":
+                into = input("    merge into node id> ").strip()
+                if into:
+                    review.merge(s, d.node_id, into)
+                    print(f"    merged into {into}")
+            elif choice == "s":
+                old = input("    supersedes node id> ").strip()
+                if old:
+                    ok, reasons, _ = review.supersede(s, d.node_id, old)
+                    print(f"    {'promoted; old node superseded' if ok else 'still blocked: ' + '; '.join(r for r in reasons if r.startswith('FAIL'))}")
+            elif choice == "e" and d.path:
+                editor = _os.environ.get("EDITOR", "vi")
+                subprocess.call([editor, d.path])
+        except ValueError as e:
+            print(f"    error: {e}")
+
+
 def cmd_council(args):
     from . import claude, council
     if not claude.available():
         print("Claude integration unavailable. To run the council:")
-        print("  - pip install 'mypm[ai]'")
+        print("  - pip install 'mypm-cli[ai]'")
         print("  - export ANTHROPIC_API_KEY=...   (and unset MYPM_NO_LLM if set)")
         sys.exit(1)
     s = _store(args)
@@ -316,7 +516,9 @@ def cmd_migrate(args):
 
 
 def build_parser():
+    from . import __version__
     p = argparse.ArgumentParser(prog="mypm")
+    p.add_argument("--version", action="version", version=f"mypm {__version__}")
     p.add_argument("--root", default="knowledge", help="knowledge root (default: knowledge)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -334,8 +536,22 @@ def build_parser():
     c.add_argument("--link", action="append", help="proposed edge as type:target_id")
     c.set_defaults(func=cmd_capture)
 
-    sub.add_parser("reflect", help="Gate 1: admit + type observations into drafts").set_defaults(func=cmd_reflect)
+    rf = sub.add_parser("reflect", help="Gate 1: admit + type observations into drafts")
+    rf.add_argument("--retry-held", dest="retry_held", action="store_true",
+                    help="re-run quarantined observations from inbox/held/")
+    rf.set_defaults(func=cmd_reflect)
     sub.add_parser("distill", help="Gate 2/3: promote, link, generalize, reindex").set_defaults(func=cmd_distill)
+
+    rv = sub.add_parser("review", help="approve/reject/merge/supersede pending drafts")
+    rv.add_argument("action", nargs="?", default=None,
+                    choices=("list", "approve", "reject", "merge", "supersede"),
+                    help="omit for interactive review")
+    rv.add_argument("node_id", nargs="?", default=None)
+    rv.add_argument("--field", action="append",
+                    help="fill a field as key=value (';' separates list items)")
+    rv.add_argument("--into", default=None, help="merge target node id")
+    rv.add_argument("--replaces", default=None, help="node id this draft supersedes")
+    rv.set_defaults(func=cmd_review)
 
     r = sub.add_parser("retrieve", help="assemble a ContextBundle for a task")
     r.add_argument("--task", required=True)
@@ -357,6 +573,17 @@ def build_parser():
     i.add_argument("--description", default=None,
                    help="one-line project description")
     i.set_defaults(func=cmd_init)
+
+    b = sub.add_parser("bootstrap", help="seed the inbox with candidates from git history")
+    b.add_argument("--repo", default=".", help="repo to read git log from (default: cwd)")
+    b.add_argument("--limit", type=int, default=20, help="how many recent commits to scan")
+    b.add_argument("--project", default=None, help="project scope for candidates")
+    b.add_argument("--enrich", action="store_true",
+                   help="use the LLM to type novel survivors (costs tokens; off by default)")
+    b.add_argument("--model", default=None, help="model for --enrich (e.g. claude-haiku-4-5)")
+    b.add_argument("--write", action="store_true",
+                   help="write candidates to the inbox (default: preview only)")
+    b.set_defaults(func=cmd_bootstrap)
 
     co = sub.add_parser("council", help="run agent doctrines as Claude calls (needs ANTHROPIC_API_KEY)")
     co.add_argument("--task", required=True)

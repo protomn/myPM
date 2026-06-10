@@ -15,7 +15,7 @@ ANY = set(ENTITY_TYPES)
 #         flag  -> surface existence as a warning, never pull content
 #         structural -> scope assignment, not a materialized edge (scope is by location)
 EDGE_RULES = {
-    "belongs_to":     {"from": ANY,                                   "to": {"project", "global"}, "policy": "structural", "materialized": False},
+    "belongs_to":     {"from": ANY,                                   "to": {"project"},           "policy": "structural", "materialized": False},
     "part_of":        {"from": {"component"},                          "to": {"component"},          "policy": "pull",  "acyclic": True},
     "depends_on":     {"from": {"component"},                          "to": {"component"},          "policy": "pull",  "acyclic": "warn"},
     "builds_on":      {"from": {"decision"},                           "to": {"decision"},           "policy": "link",  "acyclic": True},
@@ -48,6 +48,9 @@ def is_legal_edge(edge_type, from_type, to_type):
     rule = EDGE_RULES.get(edge_type)
     if rule is None:
         return False, f"unknown edge type '{edge_type}'"
+    if rule.get("materialized") is False:
+        return False, (f"'{edge_type}' is structural (scope is assigned by file "
+                       f"location) and must never exist as an edge file")
     if from_type not in rule["from"]:
         return False, f"{edge_type} cannot originate from a {from_type}"
     if to_type not in rule["to"]:

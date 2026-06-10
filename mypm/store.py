@@ -15,11 +15,18 @@ directory. This module owns the layout and all disk IO.
 from __future__ import annotations
 
 import os
+import re
 import glob
 
 import yaml
 
 from .models import Node, Edge, Observation
+
+
+# The on-disk layout version. Bump when the file shapes change (frontmatter
+# fields, directory structure) so a future `mypm migrate` can find graphs that
+# predate the change. Written once at layout creation, never touched after.
+LAYOUT_VERSION = 1
 
 
 class Store:
@@ -29,6 +36,8 @@ class Store:
     # ---- paths -----------------------------------------------------------
     @property
     def inbox_dir(self):     return os.path.join(self.root, "inbox")
+    @property
+    def held_dir(self):      return os.path.join(self.inbox_dir, "held")
     @property
     def global_dir(self):    return os.path.join(self.root, "global", "nodes")
     @property
@@ -46,10 +55,22 @@ class Store:
     def project_file(self, project_id: str) -> str:
         return os.path.join(self.projects_dir, project_id, "project.md")
 
+    @property
+    def meta_path(self):     return os.path.join(self.root, "meta.yml")
+
     def ensure_layout(self):
         for d in (self.inbox_dir, self.global_dir, self.projects_dir,
                   self.edges_dir, os.path.dirname(self.index_path)):
             os.makedirs(d, exist_ok=True)
+        if not os.path.exists(self.meta_path):
+            with open(self.meta_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump({"layout_version": LAYOUT_VERSION}, f)
+
+    def layout_version(self) -> int:
+        if not os.path.exists(self.meta_path):
+            return 1                     # pre-marker graphs are layout 1
+        with open(self.meta_path, "r", encoding="utf-8") as f:
+            return int((yaml.safe_load(f.read()) or {}).get("layout_version", 1))
 
     # ---- scope <-> location (location is authoritative) ------------------
     def scope_to_nodes_dir(self, scope: str) -> str:
@@ -71,10 +92,15 @@ class Store:
     # ---- frontmatter parsing --------------------------------------------
     @staticmethod
     def parse_frontmatter(text: str):
+        # Line-anchored: only a line that is exactly '---' delimits frontmatter,
+        # so a '---' inside a YAML value or the markdown body cannot truncate it.
         if text.startswith("---"):
-            _, fm, body = text.split("---", 2)
-            meta = yaml.safe_load(fm) or {}
-            return meta, body.lstrip("\n")
+            m = re.match(r"^---[ \t]*\n(.*?)\n---[ \t]*(?:\n|$)", text, re.S)
+            if m is None:
+                raise ValueError("unterminated frontmatter: file opens with '---' "
+                                 "but has no closing '---' line")
+            meta = yaml.safe_load(m.group(1)) or {}
+            return meta, text[m.end():].lstrip("\n")
         return {}, text
 
     @staticmethod
@@ -86,8 +112,12 @@ class Store:
     # ---- node IO ---------------------------------------------------------
     def load_node(self, path: str) -> Node:
         with open(path, "r", encoding="utf-8") as f:
-            meta, body = self.parse_frontmatter(f.read())
-        return Node.from_frontmatter(meta, body, path=path)
+            text = f.read()
+        try:
+            meta, body = self.parse_frontmatter(text)
+            return Node.from_frontmatter(meta, body, path=path)
+        except (ValueError, KeyError, yaml.YAMLError) as e:
+            raise ValueError(f"unparseable node file {path}: {e}") from e
 
     def write_node(self, node: Node) -> str:
         if node.type == "project" and node.scope.startswith("project:"):
@@ -153,3 +183,31 @@ class Store:
     def remove_observation(self, path: str):
         if os.path.exists(path):
             os.remove(path)
+
+    # ---- held quarantine ---------------------------------------------------
+    # Observations that fail Gate 1 move to inbox/held/ with their failure
+    # reasons embedded, instead of being re-processed (and, with an LLM
+    # proposer, re-billed) on every subsequent reflect run. The engineer edits
+    # the file and runs `mypm reflect --retry-held` to re-enter the gate.
+    def hold_observation(self, obs: Observation, path: str, reasons: list) -> str:
+        os.makedirs(self.held_dir, exist_ok=True)
+        held_path = os.path.join(self.held_dir, os.path.basename(path))
+        d = obs.to_yaml_dict()
+        d["held_reasons"] = list(reasons)
+        with open(held_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(d, f, sort_keys=False, allow_unicode=True)
+        self.remove_observation(path)
+        return held_path
+
+    def release_held(self) -> list:
+        """Move every held observation back into the inbox (dropping the
+        embedded reasons). Returns the released inbox paths."""
+        released = []
+        for p in sorted(glob.glob(os.path.join(self.held_dir, "*.yml"))):
+            with open(p, "r", encoding="utf-8") as f:
+                d = yaml.safe_load(f.read())
+            d.pop("held_reasons", None)
+            obs = Observation.from_yaml_dict(d)
+            released.append(self.write_observation(obs))
+            os.remove(p)
+        return released

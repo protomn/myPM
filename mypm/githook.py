@@ -132,7 +132,7 @@ def _hook_script(knowledge_root):
     return (
         "#!/bin/sh\n"
         f"{HOOK_MARKER}\n"
-        f'"{sys.executable}" -m myPM --root "{knowledge_root}" capture-pr || true\n'
+        f'"{sys.executable}" -m mypm --root "{knowledge_root}" capture-pr || true\n'
     )
 
 
