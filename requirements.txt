@@ -1,0 +1,4 @@
+pyyaml>=6.0
+
+# optional, for the test runner
+pytest>=7.0
