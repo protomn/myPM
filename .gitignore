@@ -1,4 +1,5 @@
 /venv
+/build/
 /*.egg-info
 /knowledge_demo/
 /knowledge/.index/
