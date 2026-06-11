@@ -1,0 +1,26 @@
+# myPM knowledge build pass — treat knowledge like code: it has CI.
+#
+# Copy to .github/workflows/knowledge-validate.yml. Runs only when the
+# knowledge tree changes; fails the PR on schema/edge/integrity errors so a
+# broken node never merges. Warnings (near-duplicates, scope drift) stay
+# advisory: --errors-only keeps human-judgment items out of the gate.
+
+name: knowledge
+on:
+  pull_request:
+    paths:
+      - "knowledge/**"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install mypm-cli
+      - run: mypm validate --errors-only
+        env:
+          MYPM_NO_SEMANTIC: "1"
+          MYPM_NO_LLM: "1"

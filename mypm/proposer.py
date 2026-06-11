@@ -60,8 +60,28 @@ class RuleProposer:
         # engineer didn't supply one, the raw finding IS the provisional takeaway.
         if node_type == "lesson" and not fields.get("takeaway"):
             fields["takeaway"] = obs.text.strip().rstrip(".")
-        # We deliberately do NOT fabricate root_cause; if absent, Gate 2 will
-        # correctly refuse to promote the draft until it's supplied.
+        # Same honesty for the other common types: derive Gate-1 structure FROM
+        # the text, never beyond it. "we will use X because Y" carries both a
+        # choice and a rationale; splitting on "because" is extraction, not
+        # invention. Without a because-clause, rationale stays empty and Gate 1
+        # correctly quarantines — but a complete sentence now captures cleanly.
+        if node_type == "decision":
+            parts = re.split(r"\bbecause\b|\bsince\b", obs.text,
+                             maxsplit=1, flags=re.I)
+            head = parts[0].strip(" ,;:").rstrip(".")
+            why = parts[1].strip(" ,;:").rstrip(".") if len(parts) > 1 else ""
+            if not fields.get("choice"):
+                fields["choice"] = head or obs.text.strip()
+            if why and not fields.get("rationale"):
+                fields["rationale"] = why
+        if node_type == "preference":
+            if not fields.get("statement"):
+                fields["statement"] = obs.text.strip().rstrip(".")
+            if not fields.get("strength"):
+                fields["strength"] = "default"   # the schema's own neutral value
+        # We deliberately do NOT fabricate root_cause, alternatives, or
+        # consequences; if absent, Gate 2 will correctly refuse to promote the
+        # draft until the human (or an evidence-backed fill) supplies them.
 
         return {
             "type": node_type,

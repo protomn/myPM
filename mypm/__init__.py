@@ -5,7 +5,7 @@ The graph machinery end to end: capture -> reflect (Gate 1) -> distill/review
 Claude/semantic upgrades that degrade to the deterministic substrate.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from .store import Store
 from .parser import load_node, load_edge, parse_frontmatter

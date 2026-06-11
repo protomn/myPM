@@ -1,0 +1,8 @@
+id: lesson_the_free_bootstrap_pass_produced_zero--relates_to--project_mypm
+type: relates_to
+from: lesson_the_free_bootstrap_pass_produced_zero
+to: project_mypm
+created_at: '2026-06-11T11:26:41+00:00'
+source:
+  type: distill
+note: captured into this project

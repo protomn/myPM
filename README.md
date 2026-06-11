@@ -2,6 +2,11 @@
 
 **A git-native memory layer for engineers working with AI.**
 
+> Looking for the how-to? **[USAGE.md](USAGE.md)** is the complete usage
+> guide — setup on fresh and existing repos, every command and flag, the
+> knowledge model, Claude Code integration, and day-to-day workflows. This
+> README is the *why*.
+
 ---
 
 ## The problem
@@ -109,9 +114,12 @@ Initialize any git repository:
 ```bash
 cd your-repo
 mypm init
+mypm doctor     # verify the wiring: root, index, hooks, extras
 ```
 
-This creates the `knowledge/` directory tree, writes a Project node for the repository, updates `.gitignore`, and installs the agent doctrines and architecture documentation into `.claude/`.
+This creates the `knowledge/` directory tree, writes a Project node for the repository, updates `.gitignore`, installs the agent doctrines and architecture documentation into `.claude/`, and generates `.claude/settings.json` with the capture and recall hooks **pinned to the installing interpreter** (a bare `mypm` in a hook resolves against Claude Code's PATH, not your venv's, and fails silently — `mypm doctor` checks for exactly this).
+
+After init, every command finds the knowledge root by walking up from wherever you run it — like git finds `.git`. Running from `repo/src/deep/` works; running outside any myPM repo errors with a remedy instead of inventing an empty graph.
 
 Migrating from an older `memory/` layout:
 
@@ -174,7 +182,14 @@ mypm review approve lesson_gc_pauses --field root_cause="unbounded allocations"
 mypm review reject  lesson_noise
 mypm review merge   lesson_restated --into lesson_original
 mypm review supersede decision_use_nsq --replaces decision_use_redis
+mypm review approve --all                    # bulk: every draft already passing Gate 2
+mypm review stats                            # time-to-decision, enriched vs bare
 ```
+
+Interactive review shows the draft's **content and provenance** — fields,
+body, source — not just a title: an authorship gate where the author cannot
+see the text is a rubber stamp. `--type`, `--source`, and `--project` filter
+the queue.
 
 `approve` prompts for exactly the fields Gate 2 still needs, then promotes
 through the same gate distill uses — no bypass. `supersede` wires the
@@ -192,6 +207,14 @@ and leave unknowable fields empty. A session that only runs `fill` cannot
 author knowledge no matter what it writes — promotion remains yours, one
 `mypm review approve` or `mypm distill` at the end.
 
+Whether that legwork pays for itself is measured, not assumed: every review
+verb logs one line to `<root>/.metrics/review_log.jsonl` (interactive review
+also timestamps when each draft is shown), and `mypm review stats` reports
+time-to-decision and fields-typed-at-decision split by whether the draft was
+`fill`ed first. If enrichment is working, the filled cohort approves in
+seconds with nothing typed. The log is telemetry, not knowledge — it never
+enters the graph, and a logging failure can never block a promotion.
+
 **Retrieve** — assemble context for a task:
 
 ```bash
@@ -200,9 +223,31 @@ mypm retrieve \
   --project your-project
 ```
 
-Returns a JSON ContextBundle: the relevant nodes, their types, why each was included, and any flagged conflicts. Feed this to whatever model you are working with. Pass `--agent <role>` (research, principal, adversarial, performance, oss, reflection) to bias ranking toward that agent's declared reads.
+Returns a JSON ContextBundle: the relevant nodes, their types, why each was included, and any flagged conflicts. Feed this to whatever model you are working with. Pass `--agent <role>` (research, principal, adversarial, performance, oss, reflection) to bias ranking toward that agent's declared reads, or `--format text` for human eyes.
 
-**Council** — run the agent doctrines as actual Claude calls (requires `mypm[ai]` + `ANTHROPIC_API_KEY`):
+**Recall you don't have to ask for** — `mypm init` wires a `SessionStart` hook
+that injects `mypm orient` into every Claude Code session: the project's
+description plus the most load-bearing, freshest decisions, lessons, patterns,
+and preferences, in ~1k tokens. A memory you must remember to consult is not
+yet a memory.
+
+**Read the graph directly** — `mypm show <id>` (fields, body, edges, lineage),
+`mypm search <terms>` (lexical, active + drafts).
+
+**Measure whether any of this works** — every retrieve logs its bundle;
+`mypm feedback good|bad` rates the last one; the Stop hook detects when a
+later session actually cites a recalled node. `mypm stats` reports both loops:
+what promotion costs (review telemetry) and whether recall earns its keep
+(win rate + citation rate). Measured, not assumed.
+
+**Cross-repository knowledge** — point `MYPM_GLOBAL_ROOT` at a shared
+knowledge repo (one `mypm init` there, committed and pulled like any repo).
+Its global-scope nodes — patterns, preferences — join every local recall;
+other repositories' project scopes never leak. This is the compounding loop:
+a lesson learned in one repo, promoted to a global pattern, recalled in the
+next repo on day one.
+
+**Council** — EXPERIMENTAL: run the agent doctrines as sequential Claude calls (requires `mypm[ai]` + `ANTHROPIC_API_KEY`; one full recall + completion per agent — mind the bill). The doctrines also work as plain Claude Code subagents, which is the supported path:
 
 ```bash
 mypm council \
@@ -241,10 +286,11 @@ mypm observe --transcript <path>   # what the hook runs (it reads hook JSON on s
 **Validate** — run the build pass:
 
 ```bash
-mypm validate
+mypm validate                # warnings grouped by kind and capped
+mypm validate --errors-only  # CI mode
 ```
 
-Schema validation, edge legality, referential integrity, acyclicity. Run this before promoting anything.
+Schema validation, edge legality, referential integrity, acyclicity, near-duplicate and scope-drift detection. Run this before promoting anything — and in CI: a ready-made GitHub Actions workflow ships in `mypm/templates/ci/knowledge-validate.yml` (copy to `.github/workflows/`); it fails a PR on knowledge errors while leaving judgment-call warnings advisory. For teams, the graph is reviewable like any code: knowledge changes arrive as PR diffs, `CODEOWNERS` on `knowledge/` routes them, and the build pass gates the merge.
 
 ---
 
@@ -276,14 +322,25 @@ Schema validation, edge legality, referential integrity, acyclicity. Run this be
 - ✓ Gate-1 quarantine — failing observations move to `inbox/held/` with reasons; no re-processing, no re-billing
 - ✓ Hardening — stale-index detection, malformed-file containment, field type validation, package rename to `mypm`
 
-### v0.4 — The compounding graph
+### v0.4 — The compounding graph ✓
 
 - ✓ Live Observer — `mypm observe` + Claude Code Stop/SubagentStop hooks: agents emit `mypm-capture` blocks, the hook routes them through dedup to the inbox
 - ✓ Dual-runtime doctrines — the six agents are Claude Code subagents *and* council system prompts from one file
-- □ Recall feedback — one-key "was this useful?" on retrieve output (the Recall Win Rate KPI)
+- ✓ Root discovery — every command walks up from cwd to find `knowledge/` (like git); read paths never create anything; `MYPM_ROOT` overrides
+- ✓ Pushed recall — SessionStart hook injects `mypm orient` (load-bearing slice, ~1k tokens) into every session
+- ✓ Recall feedback — `mypm feedback good|bad` + automatic citation detection in the Stop hook; `mypm stats` reports the Recall Win Rate
+- ✓ Multi-repository knowledge — `MYPM_GLOBAL_ROOT`: a shared root whose global-scope nodes join every local recall
+- ✓ First-session hardening — capture auto-links to the project node, `approve --link` works, decisions type from "X because Y", slug collisions suffix instead of false-failing, every gate failure prints its remedy
+- ✓ `mypm doctor` — loud diagnosis of every silent-by-design path (root, index, git hook, Claude hooks, extras)
+- ✓ Read surface — `mypm show`, `mypm search`, `retrieve --format text`, evidence-rich interactive review, `approve --all`
 - □ Raw-transcript extraction — mining unstructured conversation (deferred: the capture-block contract makes it mostly unnecessary)
-- □ Multi-repository knowledge — unified graph across multiple codebases
 - □ Graph visualization — dependency chains, supersession history, conflict map
+
+### v0.5 — Candidates
+
+- □ Incremental index updates (today: full rebuild, self-healing by fingerprint)
+- □ API-based embeddings (Voyage) so semantic recall doesn't require a torch install
+- □ Knowledge-diff review conventions surfaced in PR templates
 
 ---
 

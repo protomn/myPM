@@ -28,6 +28,41 @@ from .models import Node, Edge, Observation
 # predate the change. Written once at layout creation, never touched after.
 LAYOUT_VERSION = 1
 
+# The default name of the knowledge root directory inside a repository.
+DEFAULT_ROOT_NAME = "knowledge"
+
+
+def looks_like_root(path: str) -> bool:
+    """True if `path` is a knowledge root: the meta.yml marker, or (for graphs
+    that predate the marker) the layout's signature directories."""
+    if not os.path.isdir(path):
+        return False
+    if os.path.isfile(os.path.join(path, "meta.yml")):
+        return True
+    return (os.path.isdir(os.path.join(path, "edges"))
+            and (os.path.isdir(os.path.join(path, "projects"))
+                 or os.path.isdir(os.path.join(path, "global"))))
+
+
+def find_root(start: str = ".", name: str = DEFAULT_ROOT_NAME) -> str | None:
+    """Walk up from `start` looking for a knowledge root, the way git finds
+    .git. Checks `<dir>/<name>` at every level (and `start` itself, so running
+    from inside the knowledge tree works). Returns the absolute root path, or
+    None — never creates anything.
+
+    This is what makes `mypm retrieve` from repo/src/deep/ find repo/knowledge/
+    instead of silently inventing an empty graph where it stands."""
+    cur = os.path.abspath(start)
+    while True:
+        if looks_like_root(os.path.join(cur, name)):
+            return os.path.join(cur, name)
+        if os.path.basename(cur) == name and looks_like_root(cur):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+
 
 class Store:
     def __init__(self, root: str):

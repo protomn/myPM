@@ -1,0 +1,8 @@
+id: decision_discover_the_knowledge_root_by_walking--relates_to--project_mypm
+type: relates_to
+from: decision_discover_the_knowledge_root_by_walking
+to: project_mypm
+created_at: '2026-06-11T11:28:14+00:00'
+source:
+  type: distill
+note: captured into this project

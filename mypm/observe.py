@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 import yaml
 
-from .bootstrap import _tokens, _dup_of
+from .bootstrap import _tokens, _dup_of, graph_dedup_seed
 from .models import Observation
 from .schemas import ENTITY_TYPES
 
@@ -77,14 +77,7 @@ def _validate(block):
 def capture_blocks(store, text, agent=None, session=None, source="observer"):
     """Run every mypm-capture block in `text` through validate -> dedup ->
     inbox. Returns one ObserveResult per block."""
-    # Recall as the capture filter: seed dedup from what the graph holds.
-    seen = {}
-    project_nodes = set()
-    for n in store.all_nodes():
-        if n.status in ("draft", "active"):
-            seen.setdefault(n.type, []).append((n.id, _tokens(n.search_text())))
-        if n.type == "project":
-            project_nodes.add(n.id)
+    seen, project_nodes = graph_dedup_seed(store)
 
     results = []
     for block in extract_blocks(text):
@@ -155,11 +148,34 @@ def _assistant_text(transcript_path):
     return "\n\n".join(p for p in parts if p)
 
 
+def _detect_citations(store, text, session=None):
+    """Recall Win Rate's behavioral half: if a session's output names node ids
+    that recent bundles recalled, the recall was USED, not just produced. Word-
+    boundary matching against the union of recently-bundled ids; best-effort."""
+    from . import metrics
+    events = metrics.read_recall_events(store)
+    recent = [e for e in events if e.get("event") == "bundle"][-50:]
+    candidate_ids = {nid for e in recent for nid in (e.get("nodes") or [])}
+    if not candidate_ids:
+        return
+    # a Stop hook can re-scan the same transcript; (node, session) pairs
+    # already logged must not inflate the citation count
+    logged = {(e.get("node"), e.get("session"))
+              for e in events if e.get("event") == "cited"}
+    hits = [nid for nid in candidate_ids
+            if (nid, session) not in logged
+            and re.search(rf"\b{re.escape(nid)}\b", text)]
+    if hits:
+        metrics.log_citations(store, sorted(hits), session=session)
+
+
 def observe(store, transcript_path, agent=None, session=None):
     """Scan a session transcript for capture blocks. Idempotent: block ids are
     content-addressed, so re-scanning a transcript rewrites the same inbox
-    files rather than multiplying them."""
+    files rather than multiplying them. Also detects citations of recently
+    recalled nodes (metrics.recall_stats)."""
     if not os.path.exists(transcript_path):
         return []
-    return capture_blocks(store, _assistant_text(transcript_path),
-                          agent=agent, session=session)
+    text = _assistant_text(transcript_path)
+    _detect_citations(store, text, session=session)
+    return capture_blocks(store, text, agent=agent, session=session)

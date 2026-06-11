@@ -435,6 +435,37 @@ def test_enrich_calls_proposer_on_novel_candidates(tmp_path):
     assert kept[0].proposal["title"].startswith("STUB:")
 
 
+def test_enrich_rescues_rule_dropped_survivors(tmp_path):
+    """A feature/release-style subject carries no choice verb, so the rules
+    drop it — but it survived the prefilter, so --enrich must let the model
+    type it instead of yielding an empty day-1 on such histories."""
+    subject = "v0.3: live observer rollout with Stop hooks"
+    free = _run(tmp_path, [("sha1", subject, "p1", "")])
+    assert free[0].status == "dropped"
+    assert free[0].reason == "no clear decision/lesson"
+
+    rescued = _run(tmp_path, [("sha1", subject, "p1", "")],
+                   enrich=True, proposer=_StubProposer())
+    assert rescued[0].status == "kept"
+    assert rescued[0].proposal["title"].startswith("STUB:")
+
+
+def test_enrich_rescue_drops_untypeable_proposals(tmp_path):
+    """A rescue proposal missing its Gate-1 required fields would only be
+    quarantined later at reflect — drop it here, with the honest reason."""
+    class _EmptyProposer(_StubProposer):
+        def propose(self, obs):
+            p = super().propose(obs)
+            p["fields"] = {}                    # no takeaway -> not typeable
+            return p
+
+    results = _run(tmp_path, [
+        ("sha1", "v0.3: live observer rollout with Stop hooks", "p1", ""),
+    ], enrich=True, proposer=_EmptyProposer())
+    assert results[0].status == "dropped"
+    assert results[0].reason == "LLM could not type honestly"
+
+
 def test_enrich_skips_proposer_on_dropped_commits(tmp_path):
     """Pre-filtered commits must not reach the proposer even with --enrich."""
     called = []

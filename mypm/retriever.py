@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 
 from . import constraints, ranking, embeddings
-from .index import IndexReader
+from .index import IndexReader, CombinedIndex
 from .models import ContextBundle, BundleEntry
 
 SEED_K = 8
@@ -39,14 +39,16 @@ def _approx_tokens(text):
 
 
 def _relevance(task_tokens, row):
-    """Real lexical seed score: weighted term overlap (title counts double)."""
+    """Real lexical seed score: weighted term overlap (title counts double).
+    Normalized by the 3.0 max per-token contribution (title 2 + body 1) so the
+    score genuinely lives in [0,1] — the semantic blend's weights assume it."""
     title_t = set(_tokens(row["title"]))
     body_t = set(_tokens(row["search_text"]))
     if not task_tokens:
         return 0.0
     hits = sum((2.0 if t in title_t else 0.0) + (1.0 if t in body_t else 0.0)
                for t in task_tokens)
-    return hits / (2.0 * len(task_tokens))
+    return hits / (3.0 * len(task_tokens))
 
 
 def _semantic_scores(embedder, store, task, candidates):
@@ -63,8 +65,12 @@ def _semantic_scores(embedder, store, task, candidates):
 
 def retrieve(store, task, project=None, agent=None, k=SEED_K,
              budget=TOKEN_BUDGET, max_depth=MAX_DEPTH, embedder=None,
-             semantic_weight=None):
+             semantic_weight=None, global_store=None):
     idx = IndexReader(store)
+    if global_store is not None:
+        # the shared commons rides along as a second source of global-scope
+        # nodes; project scopes stay strictly local (index.CombinedIndex)
+        idx = CombinedIndex(idx, IndexReader(global_store))
     try:
         # 1 — SCOPE. The active agent (if any) biases ranking, not membership:
         # every in-scope type is a candidate; role-fit reweights at assembly,
@@ -164,3 +170,114 @@ def retrieve(store, task, project=None, agent=None, k=SEED_K,
         return bundle
     finally:
         idx.close()
+
+
+def render_text(bundle) -> str:
+    """The human-readable face of a ContextBundle — JSON is for models."""
+    lines = [f"task: {bundle.task}",
+             f"scope: {', '.join(bundle.scope)}"
+             + (f"   agent: {bundle.agent}" if bundle.agent else ""), ""]
+    if not bundle.nodes:
+        lines.append("(nothing relevant recalled — the graph may not cover "
+                     "this yet, or the wording shares no terms with it)")
+    for n in bundle.nodes:
+        d = n if isinstance(n, dict) else n.__dict__
+        lines.append(f"- [{d['type']}] {d['id']} — {d['title']}")
+        lines.append(f"    {d['why_included']}")
+        summary = " ".join((d.get("summary") or "").split())
+        if summary:
+            lines.append(f"    {summary[:300]}")
+    if bundle.conflicts:
+        lines.append("")
+        for c in bundle.conflicts:
+            lines.append(f"! conflict flagged: {c['a']} <-> {c['b']}")
+    lines.append("")
+    lines.append(f"({len(bundle.nodes)} node(s), ~{bundle.token_count} tokens"
+                 f"; {len(bundle.followups)} on-demand follow-up edge(s))")
+    return "\n".join(lines)
+
+
+# Orient: the SessionStart payload. No task exists yet, so relevance is mute;
+# centrality and recency pick the load-bearing slice. Budget is deliberately
+# small — orientation, not a download of the graph.
+ORIENT_PER_TYPE = 5
+ORIENT_CHAR_BUDGET = 4500
+
+_TYPE_ORDER = ("decision", "pattern", "preference", "component", "lesson")
+_TYPE_BLURB = {
+    "decision": "Decisions (the law of this codebase)",
+    "pattern": "Patterns (how it should be done)",
+    "preference": "Preferences (how this engineer works)",
+    "component": "Components",
+    "lesson": "Lessons (what already broke or surprised)",
+}
+
+
+def orient(store, project=None, global_store=None) -> str:
+    """A compact orientation bundle for the start of a session. Returns ''
+    when there is nothing to say (hook-safe: silence over noise)."""
+    idx = IndexReader(store)
+    try:
+        rows = idx.candidates(idx.scopes(), status="active")
+        drafts = idx.candidates(idx.scopes(), status="draft")
+    finally:
+        idx.close()
+    if global_store is not None:
+        gidx = IndexReader(global_store)
+        try:
+            seen_ids = {r["id"] for r in rows}
+            rows += [r for r in gidx.candidates(["global"], status="active")
+                     if r["id"] not in seen_ids]
+        finally:
+            gidx.close()
+    if project:
+        rows = [r for r in rows
+                if r["scope"] in ("global", f"project:{project}")]
+    if not rows:
+        return ""
+
+    projects = [r for r in rows if r["type"] == "project"]
+    knowledge = [r for r in rows if r["type"] != "project"]
+
+    out = ["<myPM>  # persistent engineering memory for this repository", ""]
+    for p in projects:
+        desc = " ".join((p["body"] or p["title"]).split())[:200]
+        out.append(f"project `{p['scope'].split(':', 1)[-1]}`: {desc}")
+    out.append("")
+
+    idx = IndexReader(store)
+    try:
+        degrees = idx.degrees()
+    finally:
+        idx.close()
+    max_deg = max(degrees.values(), default=0)
+
+    by_type = {}
+    for r in knowledge:
+        by_type.setdefault(r["type"], []).append(r)
+    for t in _TYPE_ORDER:
+        rows_t = by_type.get(t)
+        if not rows_t:
+            continue
+        # no task yet, so relevance is mute: load-bearing (degree) and fresh
+        # (recency) decide what a session should know before it starts
+        rows_t.sort(key=lambda r: ranking.score(
+            relevance=0.0, degree=degrees.get(r["id"], 0), max_degree=max_deg,
+            updated_at=r["updated_at"], node_type=r["type"]), reverse=True)
+        out.append(f"{_TYPE_BLURB[t]}:")
+        for r in rows_t[:ORIENT_PER_TYPE]:
+            title = " ".join(r["title"].split())[:90]
+            out.append(f"- `{r['id']}` — {title}")
+        if len(rows_t) > ORIENT_PER_TYPE:
+            out.append(f"  (+{len(rows_t) - ORIENT_PER_TYPE} more)")
+        out.append("")
+
+    pid = projects[0]["scope"].split(":", 1)[-1] if projects else "<id>"
+    out.append(f"recall for a task: mypm retrieve --task \"...\" --project {pid}")
+    out.append("inspect a node:    mypm show <id>")
+    if drafts:
+        out.append(f"pending review:    {len(drafts)} draft(s) — mypm review")
+    out.append("</myPM>")
+
+    text = "\n".join(out)
+    return text[:ORIENT_CHAR_BUDGET]

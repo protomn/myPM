@@ -16,6 +16,10 @@ Verbs (all per-node, unlike distill's batch):
 
 Nothing here weakens a gate. Approve runs the identical promotion code distill
 runs; review just closes the human gap that batch distill cannot.
+
+Every verb also appends one telemetry line (metrics.py) so `mypm review stats`
+can price the human gate: time-to-decision, split by whether the draft was
+enriched with `fill` first.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from .distill import promote_node, edge_counts, _gate2_check
 from .schemas import SCHEMAS
 from .index import build_index
 from .models import now_iso
+from . import metrics
 
 
 @dataclass
@@ -39,33 +44,61 @@ class PendingDraft:
     linked: bool = False
     reasons: list = field(default_factory=list)
     path: str | None = None
+    scope: str = ""
+    source: dict = field(default_factory=dict)
+    fields: dict = field(default_factory=dict)     # what IS filled, for display
+    body: str = ""
+    ready: bool = False                            # passes Gate 2 as it stands
 
 
-def pending(store):
-    """Every draft with what Gate 2 still demands of it, in stable order."""
+def pending(store, type=None, source=None, project=None):
+    """Every draft with what Gate 2 still demands of it, in stable order.
+    Optional filters narrow by node type, source type, or project id."""
     nodes = store.all_nodes()
     nodes_by_id = {n.id: n for n in nodes}
     counts = edge_counts(store.all_edges())
     out = []
     for n in sorted((n for n in nodes if n.status == "draft"), key=lambda n: n.id):
+        if type and n.type != type:
+            continue
+        if source and (n.source or {}).get("type") != source:
+            continue
+        if project and n.scope != f"project:{project}":
+            continue
         schema = SCHEMAS[n.type]
         missing = [f for f in (schema["required_draft"] + schema["required_active"])
                    if not n.fields.get(f)]
         valid_links = [l for l in n.proposed_links if l.get("to") in nodes_by_id]
         linked = bool(valid_links) or counts.get(n.id, 0) > 0
-        _, reasons = _gate2_check(n, nodes_by_id, n.proposed_links,
-                                           counts.get(n.id, 0))
-        out.append(PendingDraft(n.id, n.type, n.title, missing, linked,
-                                reasons, n.path))
+        ok, reasons = _gate2_check(n, nodes_by_id, n.proposed_links,
+                                   counts.get(n.id, 0))
+        out.append(PendingDraft(
+            n.id, n.type, n.title, missing, linked, reasons, n.path,
+            scope=n.scope, source=dict(n.source or {}),
+            fields={k: v for k, v in n.fields.items() if v},
+            body=n.body, ready=ok))
     return out
 
 
-def _coerce(node_type, fname, value):
-    """CLI values arrive as strings; list-typed fields split on ';'."""
-    want = SCHEMAS[node_type]["fields"].get(fname)
-    if want is list and isinstance(value, str):
-        return [v.strip() for v in value.split(";") if v.strip()]
-    return value
+def approve_ready(store, type=None, source=None, project=None):
+    """Bulk-approve every pending draft that already passes Gate 2 as it
+    stands — the verb for a backlog that /enrich-drafts has finished with.
+    Returns (promoted_ids, skipped) where skipped is [(id, reasons)]. The
+    same per-node promotion path runs; bulk is a loop, not a new gate."""
+    promoted, skipped = [], []
+    for d in pending(store, type=type, source=source, project=project):
+        if not d.ready:
+            skipped.append((d.node_id, d.reasons))
+            continue
+        ok, reasons, _ = approve(store, d.node_id, reindex=False)
+        (promoted.append(d.node_id) if ok
+         else skipped.append((d.node_id, reasons)))
+    if promoted:
+        build_index(store)
+    return promoted, skipped
+
+
+from .schemas import coerce_field as _coerce  # shared with reflect (one rule)
 
 
 def _get_draft(store, node_id):
@@ -95,16 +128,22 @@ def fill(store, node_id, fields=None, links=None):
             node.proposed_links.append(link)
     node.updated_at = now_iso()
     store.write_node(node)
+    metrics.log_event(store, "fill", node_id,
+                      fields=sorted(fields or {}), links=len(links or []))
 
     schema = SCHEMAS[node.type]
     return [f for f in (schema["required_draft"] + schema["required_active"])
             if not node.fields.get(f)]
 
 
-def approve(store, node_id, fields=None, links=None, reindex=True):
+def approve(store, node_id, fields=None, links=None, reindex=True,
+            _verb="approve"):
     """Fill in the supplied fields/links, then promote through the shared Gate-2
     path. Returns (ok, reasons, edges_created); on failure nothing is promoted
-    but supplied fields ARE saved, so progress is never lost."""
+    but supplied fields ARE saved, so progress is never lost.
+
+    `_verb` exists so supersede (which routes through here) logs under its own
+    name in the telemetry."""
     node = _get_draft(store, node_id)
     for k, v in (fields or {}).items():
         node.fields[k] = _coerce(node.type, k, v)
@@ -120,6 +159,7 @@ def approve(store, node_id, fields=None, links=None, reindex=True):
     ok, reasons, created = promote_node(
         store, nodes_by_id[node_id], nodes_by_id,
         counts.get(node_id, 0), source="review")
+    metrics.log_decision(store, _verb, node_id, ok=ok, fields=fields)
     if ok and reindex:
         build_index(store)
     return ok, reasons, created
@@ -131,6 +171,7 @@ def reject(store, node_id, reindex=True):
     node = _get_draft(store, node_id)
     path = node.path
     os.remove(path)
+    metrics.log_decision(store, "reject", node_id, ok=True)
     if reindex:
         build_index(store)
     return path
@@ -162,14 +203,17 @@ def merge(store, node_id, into_id, reindex=True):
     target.updated_at = now_iso()
     store.write_node(target)
     os.remove(node.path)
+    metrics.log_decision(store, "merge", node_id, ok=True)
     if reindex:
         build_index(store)
     return target.id
 
 
-def supersede(store, node_id, replaces_id, fields=None, reindex=True):
+def supersede(store, node_id, replaces_id, fields=None, links=None,
+              reindex=True):
     """Approve the draft as the successor of `replaces_id`: wires the
-    supersedes edge and (via the shared promotion path) retires the old node."""
+    supersedes edge and (via the shared promotion path) retires the old node.
+    Extra `links` ride along to the same promotion."""
     node = _get_draft(store, node_id)
     old = store.nodes_by_id().get(replaces_id)
     if old is None:
@@ -177,6 +221,7 @@ def supersede(store, node_id, replaces_id, fields=None, reindex=True):
     if old.type != node.type:
         raise ValueError(f"a {node.type} cannot supersede a {old.type}; "
                          f"supersedes requires matching types")
-    links = [{"type": "supersedes", "to": replaces_id,
-              "note": "confirmed at review"}]
-    return approve(store, node_id, fields=fields, links=links, reindex=reindex)
+    all_links = [{"type": "supersedes", "to": replaces_id,
+                  "note": "confirmed at review"}] + list(links or [])
+    return approve(store, node_id, fields=fields, links=all_links,
+                   reindex=reindex, _verb="supersede")

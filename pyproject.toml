@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 # manager), so the distribution ships as mypm-cli; the import package and the
 # console command are still `mypm`. (Same pattern as beautifulsoup4 -> bs4.)
 name = "mypm-cli"
-version = "0.3.0"
+version = "0.4.0"
 description = "A git-native engineering memory: a typed knowledge graph of decisions, lessons, and patterns that AI assistants can recall"
 readme = "README.md"
 requires-python = ">=3.11"

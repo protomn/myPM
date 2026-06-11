@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 from . import githook
 from .models import Observation, slugify
+from .schemas import SCHEMAS
 from .validator import _DUP_STOP, DUP_SIMILARITY
 
 # Low-signal commits — documentation, formatting, renames, dead-code cleanup.
@@ -99,6 +100,27 @@ class Candidate:
 def _tokens(text):
     return {w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
             if w not in _DUP_STOP and len(w) > 2}
+
+
+def graph_dedup_seed(store):
+    """(seen, project_node_ids) for Recall-as-the-capture-filter, read from
+    the derived index instead of parsing every node file — the observer runs
+    this inside the Stop hook on every session end, so it must stay cheap as
+    the graph grows."""
+    from .index import IndexReader
+    seen = {}
+    project_nodes = set()
+    idx = IndexReader(store)
+    try:
+        for status in ("draft", "active"):
+            for r in idx.candidates(idx.scopes(), status=status):
+                seen.setdefault(r["type"], []).append(
+                    (r["id"], _tokens(f'{r["title"]}\n{r["search_text"] or ""}')))
+                if r["type"] == "project":
+                    project_nodes.add(r["id"])
+    finally:
+        idx.close()
+    return seen, project_nodes
 
 
 def _commits(repo_dir, limit, run_git):
@@ -210,13 +232,10 @@ def bootstrap(store, repo_dir=".", limit=20, project=None, enrich=False,
     # and locate the project node so candidates can link to it — without at least
     # one edge a draft can never pass Gate 2, and unrecallable candidates would
     # defeat bootstrap's whole purpose.
-    seen = {}
-    project_node_id = None
-    for n in store.all_nodes():
-        if n.status in ("draft", "active"):
-            seen.setdefault(n.type, []).append((n.id, _tokens(n.search_text())))
-        if project and n.type == "project" and n.id == f"project_{project}":
-            project_node_id = n.id
+    seen, project_nodes = graph_dedup_seed(store)
+    project_node_id = (f"project_{project}"
+                       if project and f"project_{project}" in project_nodes
+                       else None)
 
     if enrich and proposer is None:
         from .proposer import get_proposer
@@ -230,10 +249,27 @@ def bootstrap(store, repo_dir=".", limit=20, project=None, enrich=False,
             continue
 
         proposal = _rule_proposal(c)
+        llm_rescued = False
         if proposal is None:
-            out.append(Candidate(c["sha"][:8], c["subject"], "commit", "dropped",
-                                 "no clear decision/lesson"))
-            continue
+            # The rules demand choice/lesson VERBS; feature- and release-style
+            # subjects ("v0.3: live observer — Stop hooks ...") carry decisions
+            # the rules cannot see. With --enrich, the model gets exactly these
+            # prefilter survivors — the free pass alone can honestly yield zero
+            # on such histories, which defeats bootstrap's purpose.
+            if enrich:
+                proposal = _llm_proposal(c, proposer)
+                required = SCHEMAS.get(proposal.get("type"), {}).get(
+                    "required_draft", [])
+                if not proposal.get("type") or any(
+                        not proposal.get("fields", {}).get(f) for f in required):
+                    out.append(Candidate(c["sha"][:8], c["subject"], "commit",
+                                         "dropped", "LLM could not type honestly"))
+                    continue
+                llm_rescued = True
+            else:
+                out.append(Candidate(c["sha"][:8], c["subject"], "commit",
+                                     "dropped", "no clear decision/lesson"))
+                continue
 
         toks = _tokens(proposal["title"] + " " + " ".join(map(str, proposal["fields"].values())))
         dup = _dup_of(toks, proposal["type"], seen)
@@ -247,7 +283,7 @@ def bootstrap(store, repo_dir=".", limit=20, project=None, enrich=False,
             proposal["supersedes"] = dup
 
         # Novel or supersession: the only place the model is consulted, and only if asked.
-        if enrich:
+        if enrich and not llm_rescued:
             enriched = _llm_proposal(c, proposer)
             if proposal.get("supersedes"):     # survives enrichment
                 enriched["supersedes"] = proposal["supersedes"]

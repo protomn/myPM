@@ -1,0 +1,2 @@
+{"ts": "2026-06-11T11:28:38.607330+00:00", "event": "bundle", "task": "why does mypm walk up from cwd to find the root", "agent": null, "nodes": ["decision_discover_the_knowledge_root_by_walking", "lesson_a_cwd_relative_default_root_made", "project_mypm", "lesson_the_free_bootstrap_pass_produced_zero", "decision_capture_from_ai_sessions_is_guaranteed"]}
+{"ts": "2026-06-11T11:28:38.672459+00:00", "event": "feedback", "verdict": "good", "note": "found the decision and its motivating lesson", "bundle_ts": "2026-06-11T11:28:38.607330+00:00"}

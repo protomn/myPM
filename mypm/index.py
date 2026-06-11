@@ -167,5 +167,68 @@ class IndexReader:
             "SELECT COUNT(*) FROM edges WHERE from_id=? OR to_id=?",
             (node_id, node_id)).fetchone()[0]
 
+    def degrees(self):
+        """Every node's edge degree in one pass: {node_id: degree}."""
+        out = {}
+        for nid, n in self.con.execute(
+                "SELECT id, COUNT(*) FROM ("
+                "  SELECT from_id AS id FROM edges"
+                "  UNION ALL SELECT to_id AS id FROM edges) GROUP BY id"):
+            out[nid] = n
+        return out
+
+    def scopes(self):
+        """Every distinct scope present in the graph."""
+        return [r[0] for r in self.con.execute(
+            "SELECT DISTINCT scope FROM nodes")]
+
     def close(self):
         self.con.close()
+
+
+class CombinedIndex:
+    """Read-only union of a local root and the shared global root
+    (MYPM_GLOBAL_ROOT). The secondary contributes ONLY its global-scope nodes:
+    other repositories' project scopes must never leak into this repo's
+    recall. On id collision the local root wins — your repo's reading of a
+    fact beats the commons'. Edges are unioned; cross-root edges do not exist
+    by construction (each root's edge files reference its own nodes)."""
+
+    def __init__(self, primary: IndexReader, secondary: IndexReader):
+        self.primary = primary
+        self.secondary = secondary
+
+    def candidates(self, scopes, status="active", type_in=None):
+        rows = self.primary.candidates(scopes, status=status, type_in=type_in)
+        if "global" not in scopes:
+            return rows
+        seen = {r["id"] for r in rows}
+        rows += [r for r in
+                 self.secondary.candidates(["global"], status=status,
+                                           type_in=type_in)
+                 if r["id"] not in seen]
+        return rows
+
+    def get_node(self, node_id):
+        return self.primary.get_node(node_id) or self.secondary.get_node(node_id)
+
+    def out_edges(self, node_id):
+        return self.primary.out_edges(node_id) + self.secondary.out_edges(node_id)
+
+    def in_edges(self, node_id):
+        return self.primary.in_edges(node_id) + self.secondary.in_edges(node_id)
+
+    def degree(self, node_id):
+        return self.primary.degree(node_id) + self.secondary.degree(node_id)
+
+    def degrees(self):
+        out = dict(self.secondary.degrees())
+        out.update(self.primary.degrees())
+        return out
+
+    def scopes(self):
+        return sorted(set(self.primary.scopes()) | {"global"})
+
+    def close(self):
+        self.primary.close()
+        self.secondary.close()

@@ -30,6 +30,7 @@ class Issue:
     level: str        # "error" | "warning"
     where: str        # node/edge id
     message: str
+    kind: str = ""    # grouping key for aggregated output ("" = ungrouped)
 
     def __str__(self):
         return f"[{self.level.upper():7}] {self.where}: {self.message}"
@@ -76,11 +77,12 @@ def validate_node(node, store=None):
     # warning level because legacy graphs may predate the check)
     for fld, val in node.fields.items():
         if fld not in schema["fields"]:
-            issues.append(Issue("warning", node.id, f"unknown field '{fld}' for {node.type}"))
+            issues.append(Issue("warning", node.id,
+                f"unknown field '{fld}' for {node.type}", kind="unknown-field"))
         elif val is not None and not isinstance(val, schema["fields"][fld]):
             issues.append(Issue("warning", node.id,
                 f"field '{fld}' should be {schema['fields'][fld].__name__}, "
-                f"got {type(val).__name__}"))
+                f"got {type(val).__name__}", kind="field-type"))
     return issues
 
 
@@ -146,6 +148,16 @@ def _content_tokens(node):
             if w not in _DUP_STOP and len(w) > 2}
 
 
+# Cap near-duplicate reports per node: past a few, more lines carry no new
+# information and flood the build output (observed: a dense graph produced
+# six-figure warning counts, which trains people to ignore the build pass).
+DUP_REPORTS_PER_NODE = 3
+# Two nodes must share at least this many informative tokens before the exact
+# Jaccard is computed — an inverted-index prefilter that replaces the all-pairs
+# O(N^2) scan with one proportional to genuinely-overlapping pairs.
+DUP_MIN_SHARED = 3
+
+
 def validate_duplicates(nodes):
     """Warn on near-duplicate live nodes of the same type (Jaccard token overlap).
 
@@ -159,19 +171,39 @@ def validate_duplicates(nodes):
     by_type = {}
     for n in live:
         by_type.setdefault(n.type, []).append((n, _content_tokens(n)))
+
     for items in by_type.values():
-        for i in range(len(items)):
-            ni, ti = items[i]
-            if not ti:
+        # inverted index: token -> item positions; candidate pairs are those
+        # co-occurring under at least DUP_MIN_SHARED tokens
+        posting = {}
+        for i, (_, toks) in enumerate(items):
+            for t in toks:
+                posting.setdefault(t, []).append(i)
+        shared = {}
+        for plist in posting.values():
+            if len(plist) < 2 or len(plist) > max(50, len(items) // 4):
+                continue            # ubiquitous tokens carry no dup signal
+            for a in range(len(plist)):
+                for b in range(a + 1, len(plist)):
+                    pair = (plist[a], plist[b])
+                    shared[pair] = shared.get(pair, 0) + 1
+        reported = {}
+        for (i, j), count in sorted(shared.items()):
+            if count < DUP_MIN_SHARED:
                 continue
-            for nj, tj in items[i + 1:]:
-                if not tj:
+            ni, ti = items[i]
+            nj, tj = items[j]
+            if not ti or not tj:
+                continue
+            jac = len(ti & tj) / len(ti | tj)
+            if jac >= DUP_SIMILARITY:
+                if reported.get(ni.id, 0) >= DUP_REPORTS_PER_NODE:
                     continue
-                jac = len(ti & tj) / len(ti | tj)
-                if jac >= DUP_SIMILARITY:
-                    issues.append(Issue("warning", ni.id,
-                        f"near-duplicate of {nj.id} ({jac:.0%} content overlap); "
-                        f"supersede, link via relates_to, or let one evaporate"))
+                reported[ni.id] = reported.get(ni.id, 0) + 1
+                issues.append(Issue("warning", ni.id,
+                    f"near-duplicate of {nj.id} ({jac:.0%} content overlap); "
+                    f"supersede, link via relates_to, or let one evaporate",
+                    kind="duplicate"))
     return issues
 
 
@@ -197,7 +229,8 @@ def validate_scope_drift(nodes, edges, nodes_by_id):
                 and frm.scope != to.scope):
             issues.append(Issue("warning", e.id,
                 f"cross-project edge {frm.scope} -> {to.scope}; project-scoped "
-                f"knowledge should connect within a project or promote to global"))
+                f"knowledge should connect within a project or promote to global",
+                kind="scope-drift"))
 
     for n in nodes:
         if n.scope != "global":
@@ -207,7 +240,8 @@ def validate_scope_drift(nodes, edges, nodes_by_id):
             if pid in hay or pid.replace("_", " ") in hay:
                 issues.append(Issue("warning", n.id,
                     f"global node names project '{pid}'; consider scoping it to "
-                    f"project:{pid} or removing the project-specific reference"))
+                    f"project:{pid} or removing the project-specific reference",
+                    kind="scope-drift"))
                 break
     return issues
 
