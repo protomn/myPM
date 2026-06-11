@@ -77,6 +77,30 @@ def _get_draft(store, node_id):
     return node
 
 
+def fill(store, node_id, fields=None, links=None):
+    """Save fields/links onto a draft WITHOUT promoting — the enrichment verb.
+
+    This is the surface an LLM session (Claude Code, Codex) may drive freely:
+    it can research a draft's source commit and fill in what the evidence
+    supports, while promotion stays a human act (approve/distill). Splitting
+    the verbs is what keeps the authorship line intact — a session that only
+    runs `fill` cannot author knowledge, no matter what it writes.
+
+    Returns the list of Gate-2 required fields still missing after the fill."""
+    node = _get_draft(store, node_id)
+    for k, v in (fields or {}).items():
+        node.fields[k] = _coerce(node.type, k, v)
+    for link in (links or []):
+        if link not in node.proposed_links:
+            node.proposed_links.append(link)
+    node.updated_at = now_iso()
+    store.write_node(node)
+
+    schema = SCHEMAS[node.type]
+    return [f for f in (schema["required_draft"] + schema["required_active"])
+            if not node.fields.get(f)]
+
+
 def approve(store, node_id, fields=None, links=None, reindex=True):
     """Fill in the supplied fields/links, then promote through the shared Gate-2
     path. Returns (ok, reasons, edges_created); on failure nothing is promoted

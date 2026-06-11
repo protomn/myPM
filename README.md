@@ -182,6 +182,16 @@ through the same gate distill uses — no bypass. `supersede` wires the
 Gate 1 are quarantined in `inbox/held/` with their failure reasons embedded;
 edit the file and run `mypm reflect --retry-held`.
 
+`fill` is the enrichment verb: it saves fields **without ever promoting**, and
+it exists so an LLM session can do the legwork safely. The `/enrich-drafts`
+command (installed into `.claude/commands/` by `mypm init`) instructs a Claude
+Code session to read each draft's source commit (`git show <sha>` — the sha is
+in every draft's provenance), fill `root_cause`/`alternatives`/`consequences`
+with what the diff and PR discussion actually evidence (citing the sha inline),
+and leave unknowable fields empty. A session that only runs `fill` cannot
+author knowledge no matter what it writes — promotion remains yours, one
+`mypm review approve` or `mypm distill` at the end.
+
 **Retrieve** — assemble context for a task:
 
 ```bash

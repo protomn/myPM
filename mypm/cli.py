@@ -103,7 +103,7 @@ def cmd_init(args):
             if _os.path.exists(src):
                 _install(src, _os.path.join(claude_dir, fname))
 
-        for subdir in ("agents", "architecture"):
+        for subdir in ("agents", "architecture", "commands"):
             src_dir = _os.path.join(_TEMPLATES_DIR, subdir)
             dst_dir = _os.path.join(claude_dir, subdir)
             if _os.path.isdir(src_dir):
@@ -310,7 +310,8 @@ def cmd_review(args):
         if args.action is None:
             _review_interactive(s, review, drafts)
         else:
-            print("\napprove:   mypm review approve <id> --field root_cause='...'")
+            print("\nfill:      mypm review fill <id> --field root_cause='...'   (saves, never promotes)")
+            print("approve:   mypm review approve <id> --field root_cause='...'")
             print("reject:    mypm review reject <id>")
             print("merge:     mypm review merge <id> --into <existing-id>")
             print("supersede: mypm review supersede <id> --replaces <old-id>")
@@ -321,7 +322,20 @@ def cmd_review(args):
         sys.exit(1)
 
     try:
-        if args.action == "approve":
+        if args.action == "fill":
+            links = []
+            for ln in (args.link or []):
+                etype, _, to = ln.partition(":")
+                links.append({"type": etype, "to": to})
+            missing = review.fill(s, args.node_id,
+                                  fields=_parse_fields(args.field), links=links)
+            print(f"saved (still a draft)")
+            if missing:
+                print(f"still needs: {', '.join(missing)}")
+            else:
+                print("complete — ready for human approval (mypm review approve "
+                      f"{args.node_id} or mypm distill)")
+        elif args.action == "approve":
             ok, reasons, created = review.approve(s, args.node_id,
                                                   fields=_parse_fields(args.field))
             if ok:
@@ -592,11 +606,13 @@ def build_parser():
 
     rv = sub.add_parser("review", help="approve/reject/merge/supersede pending drafts")
     rv.add_argument("action", nargs="?", default=None,
-                    choices=("list", "approve", "reject", "merge", "supersede"),
-                    help="omit for interactive review")
+                    choices=("list", "fill", "approve", "reject", "merge", "supersede"),
+                    help="omit for interactive review; 'fill' saves fields without promoting")
     rv.add_argument("node_id", nargs="?", default=None)
     rv.add_argument("--field", action="append",
                     help="fill a field as key=value (';' separates list items)")
+    rv.add_argument("--link", action="append",
+                    help="propose an edge as type:target_id (saved, not materialized)")
     rv.add_argument("--into", default=None, help="merge target node id")
     rv.add_argument("--replaces", default=None, help="node id this draft supersedes")
     rv.set_defaults(func=cmd_review)

@@ -46,5 +46,6 @@ mypm = [
     "templates/*.md",
     "templates/*.json",
     "templates/agents/*.md",
+    "templates/commands/*.md",
     "templates/architecture/*.md",
 ]

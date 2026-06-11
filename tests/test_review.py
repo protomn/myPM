@@ -119,6 +119,66 @@ def test_approve_rejects_non_draft(tmp_path):
         pass
 
 
+# ---- fill (the enrichment verb — saves, never promotes) ---------------------
+
+def test_fill_saves_fields_but_never_promotes(tmp_path):
+    s = _store(tmp_path)
+    _project(s)
+    _draft_lesson(s)
+    missing = review.fill(s, "lesson_gc_pauses",
+                          fields={"root_cause": "unbounded allocations (per diff of a1b2c3d)"})
+    assert missing == []                       # nothing left for Gate 2's fields
+    node = s.nodes_by_id()["lesson_gc_pauses"]
+    assert node.status == "draft"              # the load-bearing assertion
+    assert "a1b2c3d" in node.fields["root_cause"]
+
+
+def test_fill_reports_remaining_missing_fields(tmp_path):
+    s = _store(tmp_path)
+    _project(s)
+    s.write_node(Node(
+        id="decision_use_nsq2", type="decision", title="Use NSQ",
+        scope="project:svc", status="draft",
+        fields={"choice": "NSQ", "rationale": "ops"},
+        proposed_links=[{"type": "relates_to", "to": "project_svc"}]))
+    missing = review.fill(s, "decision_use_nsq2",
+                          fields={"alternatives": "kafka; rabbitmq"})
+    assert missing == ["consequences"]
+    node = s.nodes_by_id()["decision_use_nsq2"]
+    assert node.fields["alternatives"] == ["kafka", "rabbitmq"]   # list coerced
+
+
+def test_fill_then_human_approve_promotes(tmp_path):
+    s = _store(tmp_path)
+    _project(s)
+    _draft_lesson(s)
+    review.fill(s, "lesson_gc_pauses", fields={"root_cause": "alloc storm"})
+    ok, reasons, _ = review.approve(s, "lesson_gc_pauses")
+    assert ok, reasons
+    assert s.nodes_by_id()["lesson_gc_pauses"].status == "active"
+
+
+def test_fill_adds_proposed_links(tmp_path):
+    s = _store(tmp_path)
+    _project(s)
+    _draft_lesson(s, links=[])
+    review.fill(s, "lesson_gc_pauses",
+                links=[{"type": "relates_to", "to": "project_svc"}])
+    node = s.nodes_by_id()["lesson_gc_pauses"]
+    assert node.status == "draft"
+    assert node.proposed_links == [{"type": "relates_to", "to": "project_svc"}]
+
+
+def test_fill_rejects_non_draft(tmp_path):
+    s = _store(tmp_path)
+    _project(s)
+    try:
+        review.fill(s, "project_svc", fields={"description": "x"})
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+
+
 # ---- reject ----------------------------------------------------------------
 
 def test_reject_removes_draft(tmp_path):

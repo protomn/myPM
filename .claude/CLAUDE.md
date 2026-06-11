@@ -18,7 +18,9 @@ mypm bootstrap --limit 100 --write          seed candidates from git history (de
 mypm capture --text "..." --project <id>   record a raw observation
 mypm reflect [--retry-held]                 Gate 1: type observations into draft nodes
 mypm distill                                Gates 2+3: promote drafts, wire edges, rebuild index
-mypm review [list|approve|reject|merge|supersede]   per-draft approval surface
+mypm review [list|fill|approve|reject|merge|supersede]   per-draft approval surface
+                                            (fill saves evidence-backed fields, never promotes —
+                                             the verb LLM sessions may use; see /enrich-drafts)
 mypm retrieve --task "..." --project <id>  recall context for a task
 mypm council --task "..."                   run agent doctrines as Claude calls
 mypm hook install                           auto-capture draft Decisions from merged PRs
