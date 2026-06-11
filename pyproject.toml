@@ -44,6 +44,7 @@ packages = ["mypm", "mypm.schemas"]
 [tool.setuptools.package-data]
 mypm = [
     "templates/*.md",
+    "templates/*.json",
     "templates/agents/*.md",
     "templates/architecture/*.md",
 ]

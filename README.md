@@ -210,6 +210,24 @@ mypm hook install        # drops a post-merge hook
 mypm capture-pr          # or run it manually against HEAD
 ```
 
+**Live capture from Claude Code sessions** — the six agent doctrines in
+`.claude/agents/` are dual-runtime: valid Claude Code **subagents** (frontmatter
+with name/description/tools) *and* the system prompts `mypm council` runs via
+the API. Under either runtime, an agent ends its reply with a fenced
+`mypm-capture` block per durable finding. Capture is then **guaranteed, not
+hoped for**: `mypm init` installs `.claude/settings.json` with `Stop` and
+`SubagentStop` hooks that run `mypm observe` — it scans the session transcript
+for capture blocks, dedups them against the graph (Recall as the capture
+filter), and writes survivors to the inbox. Content-addressed observation ids
+make re-scans idempotent; outside a myPM repo the hook is a silent no-op. The
+doctrines also instruct agents to run `mypm retrieve --agent <name>` before
+reasoning — the full Golden Loop, with the human still authoring every
+promotion through `mypm review`.
+
+```bash
+mypm observe --transcript <path>   # what the hook runs (it reads hook JSON on stdin)
+```
+
 **Validate** — run the build pass:
 
 ```bash
@@ -250,8 +268,10 @@ Schema validation, edge legality, referential integrity, acyclicity. Run this be
 
 ### v0.4 — The compounding graph
 
-- □ Live Observer — the bootstrap extractor pointed at a stream instead of history
+- ✓ Live Observer — `mypm observe` + Claude Code Stop/SubagentStop hooks: agents emit `mypm-capture` blocks, the hook routes them through dedup to the inbox
+- ✓ Dual-runtime doctrines — the six agents are Claude Code subagents *and* council system prompts from one file
 - □ Recall feedback — one-key "was this useful?" on retrieve output (the Recall Win Rate KPI)
+- □ Raw-transcript extraction — mining unstructured conversation (deferred: the capture-block contract makes it mostly unnecessary)
 - □ Multi-repository knowledge — unified graph across multiple codebases
 - □ Graph visualization — dependency chains, supersession history, conflict map
 

@@ -8,6 +8,7 @@
     python -m mypm council    --task "..." [--preset minimal]   # doctrines as Claude calls
     python -m mypm capture-pr [--commit HEAD]      # draft Decision from a merged PR
     python -m mypm hook       install|uninstall    # post-merge auto-capture
+    python -m mypm observe    [--transcript p]     # live observer (Claude Code Stop hook)
     python -m mypm validate   [--root memory]      # the build pass
     python -m mypm index      [--root memory]
 """
@@ -94,7 +95,10 @@ def cmd_init(args):
                 shutil.copy2(src, dst)
                 installed.append(dst)
 
-        for fname in ("CLAUDE.md", "council.md"):
+        # settings.json wires the live-observer hooks (Stop/SubagentStop ->
+        # `mypm observe`). Never merged into an existing settings.json — the
+        # user's config wins; we only create, never modify.
+        for fname in ("CLAUDE.md", "council.md", "settings.json"):
             src = _os.path.join(_TEMPLATES_DIR, fname)
             if _os.path.exists(src):
                 _install(src, _os.path.join(claude_dir, fname))
@@ -406,6 +410,47 @@ def _review_interactive(s, review, drafts):
             print(f"    error: {e}")
 
 
+def cmd_observe(args):
+    """Hook-safe by construction: exits 0 no matter what (a non-zero exit from
+    a Stop hook would block the session from stopping), creates nothing in
+    repos that don't use myPM, and says nothing unless asked."""
+    from . import observe as obs_mod
+
+    if not _os.path.isdir(args.root):
+        return                                   # not a myPM repo: silent no-op
+
+    transcript, session = args.transcript, None
+    if not transcript:
+        try:
+            payload = json.load(sys.stdin)       # Claude Code hook input
+        except (json.JSONDecodeError, OSError):
+            return
+        transcript = payload.get("transcript_path")
+        session = payload.get("session_id")
+    if not transcript or not _os.path.exists(transcript):
+        return
+
+    try:
+        s = Store(args.root)
+        results = obs_mod.observe(s, transcript, session=session)
+    except Exception as e:
+        if not args.quiet:
+            print(f"observe: {e}")
+        return
+
+    captured = [r for r in results if r.status == "captured"]
+    if args.quiet:
+        return
+    if not results:
+        print("observe: no capture blocks found.")
+        return
+    for r in results:
+        note = f"  ({r.reason})" if r.reason else ""
+        print(f"  {r.status:9} {r.title[:60]}{note}")
+    if captured:
+        print(f"\n{len(captured)} observation(s) to the inbox; next: mypm reflect")
+
+
 def cmd_council(args):
     from . import claude, council
     if not claude.available():
@@ -424,6 +469,9 @@ def cmd_council(args):
     for t in turns:
         print(f"\n===== {t.agent} ({t.command}) — {t.mandate} =====\n")
         print(t.output)
+        for r in (t.captured or []):
+            if r.status == "captured":
+                print(f"\n  [captured -> inbox] {r.title}")
 
 
 def cmd_capture_pr(args):
@@ -552,6 +600,14 @@ def build_parser():
     rv.add_argument("--into", default=None, help="merge target node id")
     rv.add_argument("--replaces", default=None, help="node id this draft supersedes")
     rv.set_defaults(func=cmd_review)
+
+    ob = sub.add_parser("observe",
+                        help="capture mypm-capture blocks from a session transcript "
+                             "(wired as a Claude Code Stop hook by mypm init)")
+    ob.add_argument("--transcript", default=None,
+                    help="transcript path (omit when run as a hook: read from stdin JSON)")
+    ob.add_argument("--quiet", action="store_true", help="hook mode: never print")
+    ob.set_defaults(func=cmd_observe)
 
     r = sub.add_parser("retrieve", help="assemble a ContextBundle for a task")
     r.add_argument("--task", required=True)

@@ -49,7 +49,11 @@ Operating rules for this run:
 - Ground every claim in the recalled ContextBundle or the stated task. Do not
   invent lessons, decisions, or evidence that the record does not contain.
 - If the recalled context already settles part of the task, say so and cite the
-  node id rather than re-deriving it."""
+  node id rather than re-deriving it.
+- If (and only if) your turn produced a durable finding, end your reply with one
+  fenced ```mypm-capture block per finding (type, title, fields, tags — as your
+  doctrine specifies). The block is routed through the normal gates: inbox only,
+  deduped, human-approved. No finding -> no block; never fabricate one."""
 
 
 @dataclass
@@ -59,11 +63,15 @@ class AgentTurn:
     command: str
     output: str
     bundle: dict
+    captured: list | None = None    # ObserveResults from the agent's capture blocks
 
 
 def _doctrine_text(agent) -> str | None:
     """Locate an agent's doctrine: installed copy first (the user may have edited
-    it), then the repo docs, then the bundled template."""
+    it), then the repo docs, then the bundled template. The doctrines carry
+    Claude Code subagent frontmatter (name/description/tools) — runtime metadata
+    for the OTHER runtime — so it is stripped before use as a system prompt."""
+    from .store import Store
     here = os.path.dirname(os.path.abspath(__file__))
     for path in (
         os.path.join(os.path.abspath("."), ".claude", "agents", agent.doctrine),
@@ -72,7 +80,12 @@ def _doctrine_text(agent) -> str | None:
     ):
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
-                return f.read()
+                text = f.read()
+            try:
+                _, body = Store.parse_frontmatter(text)
+                return body
+            except ValueError:
+                return text          # malformed frontmatter: use verbatim
     return None
 
 
@@ -110,7 +123,10 @@ def _build_user(task, bundle, prior):
 
 
 def run_agent(store, agent_name, task, project=None, client=None, prior=None):
-    """Run one agent: recall -> reason under doctrine -> draft proposal."""
+    """Run one agent: recall -> reason under doctrine -> draft proposal. Any
+    mypm-capture blocks in the output are routed to the inbox through the same
+    observer machinery the Claude Code hook uses (one contract, two runtimes)."""
+    from .observe import capture_blocks
     agent = agents.get(agent_name)
     if agent is None:
         raise ValueError(f"unknown agent '{agent_name}'")
@@ -121,7 +137,9 @@ def run_agent(store, agent_name, task, project=None, client=None, prior=None):
         f"You are the {agent.name} agent. Mandate: {agent.mandate}.")
     system = doctrine + _GUARDRAILS
     output = client.complete(system=system, user=_build_user(task, bundle, prior))
-    return AgentTurn(agent_name, agent.mandate, agent.command, output, bundle)
+    captured = capture_blocks(store, output, agent=agent_name, source="council")
+    return AgentTurn(agent_name, agent.mandate, agent.command, output, bundle,
+                     captured)
 
 
 def run_council(store, task, agent_names, project=None, client=None):

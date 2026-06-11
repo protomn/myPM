@@ -22,6 +22,8 @@ mypm review [list|approve|reject|merge|supersede]   per-draft approval surface
 mypm retrieve --task "..." --project <id>  recall context for a task
 mypm council --task "..."                   run agent doctrines as Claude calls
 mypm hook install                           auto-capture draft Decisions from merged PRs
+mypm observe --transcript <path>            capture mypm-capture blocks from a session
+                                            (auto-wired: Stop/SubagentStop hooks in .claude/settings.json)
 mypm validate                               run the build/lint pass
 ```
 
