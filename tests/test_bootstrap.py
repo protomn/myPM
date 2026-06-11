@@ -146,6 +146,86 @@ def test_squash_merge_typed_as_decision(tmp_path):
     assert _kept(results)[0].proposal["type"] == "decision"
 
 
+# ---- conventional-prefix repos (scipy/numpy style) -----------------------
+
+def test_prefix_does_not_blind_supersession(tmp_path):
+    """'PERF: replace spsolve with CG' — the prefix must not hide the
+    supersession verb (found live on a scipy fork)."""
+    results = _run(tmp_path, [
+        ("sha1", "PERF: replace spsolve with CG + LinearOperator for 2D WH smoothing",
+         "p1", ""),
+    ])
+    assert len(_kept(results)) == 1
+    p = _kept(results)[0].proposal
+    assert p["type"] == "decision" and p.get("is_supersession")
+
+
+def test_prefix_does_not_blind_adoption(tmp_path):
+    results = _run(tmp_path, [
+        ("sha1", "MAINT: use boost for special.hyp1f1 with real input", "p1", ""),
+    ])
+    assert len(_kept(results)) == 1
+    assert _kept(results)[0].proposal["type"] == "decision"
+
+
+def test_fix_prefix_types_lesson(tmp_path):
+    results = _run(tmp_path, [
+        ("sha1", "FIX: Convergence error in CG solver", "p1", ""),
+    ])
+    assert len(_kept(results)) == 1
+    p = _kept(results)[0].proposal
+    assert p["type"] == "lesson"
+    assert p["fields"]["takeaway"] == "Convergence error in CG solver"
+
+
+def test_chore_prefixes_dropped(tmp_path):
+    results = _run(tmp_path, [
+        ("sha1", "TST: added test suite for 2D signal whittaker_henderson", "p1", ""),
+        ("sha2", "BLD: remove macos fortran cruft", "p1", ""),
+        ("sha3", "DEV: add linux-aarch64 to pixi config", "p1", ""),
+        ("sha4", "MAINT: NumPy 2.x C level cleanups", "p1", ""),
+    ])
+    assert all(c.status == "dropped" for c in results), \
+        [(c.subject, c.status) for c in results]
+
+
+def test_chore_prefix_with_decision_language_kept(tmp_path):
+    # "TST: use X instead of Y" is an infrastructure choice, not routine tests
+    results = _run(tmp_path, [
+        ("sha1", "TST: use xp-assertions instead of assert_really_equal", "p1", ""),
+    ])
+    assert len(_kept(results)) == 1
+    assert _kept(results)[0].proposal["type"] == "decision"
+
+
+def test_routine_squash_merge_not_a_decision(tmp_path):
+    """On GitHub-flow repos every commit is a PR — '(#N)' alone must not type
+    a decision (found live: 40% of scipy history became 'decisions')."""
+    results = _run(tmp_path, [
+        ("sha1", "TST: special: Tweak a few tests that consistently fail (#25284)", "p1", ""),
+        ("sha2", "MAINT: special: removed duplicated docstrings (#25288)", "p1", ""),
+    ])
+    assert all(c.status == "dropped" for c in results), \
+        [(c.subject, c.status) for c in results]
+
+
+def test_squash_merge_with_choice_language_still_decision(tmp_path):
+    results = _run(tmp_path, [
+        ("sha1", "ENH: migrate special.ncfdtrinc to boost (#25138)", "p1", ""),
+    ])
+    assert len(_kept(results)) == 1
+    p = _kept(results)[0].proposal
+    assert p["type"] == "decision" and p["source"] == "pr"
+    assert "25138" in p["ref"]
+
+
+def test_plain_merge_commit_without_signal_dropped(tmp_path):
+    results = _run(tmp_path, [
+        ("sha1", "Merge pull request #25283 from andyfaff/fc", "p1 p2", ""),
+    ])
+    assert results[0].status == "dropped"
+
+
 # ---- dedup (recall-as-filter) ------------------------------------------
 
 def test_duplicate_candidate_deduped(tmp_path):

@@ -63,6 +63,27 @@ _CONSTRAINT_RE = re.compile(r"(assert(ed)?|enforc|clamp(ed)?|bound|guard|invaria
 # work happening, not a choice. It falls to --enrich, which can judge whether it
 # warrants a Component node.
 
+# Conventional commit prefixes — numpy/scipy/pandas style ("MAINT:", "TST:",
+# "PERF:") and conventional-commits ("feat:", "perf:"). The prefix is signal,
+# but it also sits at column 0 and blinds every ^-anchored rule above: "PERF:
+# replace spsolve with CG" carries a supersession that "replace" at column 7
+# never matches. So the prefix is split off and used as a typing HINT, and the
+# content rules run against the remainder.
+_CONV_RE = re.compile(r"^\s*([a-z]{2,8}(?:/[a-z]{2,8})?)\s*:\s*", re.I)
+_LESSON_PREFIXES = {"fix", "fixes", "bug", "hotfix", "regr"}
+_CHORE_PREFIXES = {"doc", "docs", "sty", "style", "ci", "tst", "test", "tests",
+                   "bld", "build", "dev", "rel", "chore", "wip", "lint", "typ",
+                   "fmt", "deps", "release"}
+
+
+def _split_conventional(subject):
+    """('maint', 'use boost for hyp1f1') from 'MAINT: use boost for hyp1f1';
+    (None, subject) when no recognized prefix. 'MAINT/TST:' keeps the first."""
+    m = _CONV_RE.match(subject or "")
+    if not m:
+        return None, subject
+    return m.group(1).lower().split("/")[0], subject[m.end():].strip()
+
 
 @dataclass
 class Candidate:
@@ -106,14 +127,47 @@ def _prefilter(subject, body):
     return None
 
 
+def _typed(title, body, source, ref):
+    """Content-based typing, prefix-aware. Returns a proposal dict or None."""
+    prefix, rest = _split_conventional(title)
+
+    # A chore prefix (TST:, DOC:, BLD:, ...) is presumed routine unless the
+    # remainder itself carries decision language ("TST: use xp-assertions
+    # instead of ..." is an infrastructure choice; "TST: add tests" is not).
+    if prefix in _CHORE_PREFIXES and not (
+            _SUPERSESSION_RE.match(rest) or _ADOPTION_RE.match(rest)
+            or _CONSTRAINT_RE.search(rest)):
+        return None
+
+    if prefix in _LESSON_PREFIXES or _LESSON_RE.match(rest):
+        return {"type": "lesson", "title": title, "source": source, "ref": ref,
+                "fields": {"takeaway": rest or title,
+                           "trigger": body or title}}  # root_cause left empty
+    if _SUPERSESSION_RE.match(rest):
+        return {"type": "decision", "title": title, "source": source, "ref": ref,
+                "is_supersession": True,
+                "fields": {"choice": rest or title, "rationale": body or title}}
+    if _ADOPTION_RE.match(rest) or _CONSTRAINT_RE.search(rest):
+        return {"type": "decision", "title": title, "source": source, "ref": ref,
+                "fields": {"choice": rest or title, "rationale": body or title}}
+    return None
+
+
 def _rule_proposal(commit):
     """Deterministic typing from the commit's structure. Conservative: returns
-    None rather than forcing a type onto something that isn't clearly one."""
+    None rather than forcing a type onto something that isn't clearly one.
+
+    A merged PR is treated as provenance, not as proof of a decision: on
+    GitHub-flow repos every commit lands via a PR, so blanket-typing merges
+    floods the inbox with routine maintenance (observed on scipy: 40% of
+    history became "decisions"). The PR title must still carry decision or
+    lesson language to be typed — the live post-merge hook (githook.capture_pr)
+    deliberately stays more credulous, because there a human just chose to
+    merge that one PR. Bulk credulity is what bootstrap must not have."""
     desc = githook.parse_merge(commit["subject"], commit["body"], commit["parents"])
     if desc:
         ref = f"PR #{desc['pr']}" if desc["pr"] else commit["sha"][:8]
-        return {"type": "decision", "title": desc["title"], "source": "pr", "ref": ref,
-                "fields": {"choice": desc["title"], "rationale": desc["rationale"]}}
+        return _typed(desc["title"], desc["rationale"], "pr", ref)
 
     subj, body = commit["subject"], commit["body"]
     # A vague subject ("fixes", "bug fix") that survived the prefilter did so on
@@ -121,20 +175,7 @@ def _rule_proposal(commit):
     # not the mood-word subject.
     if _VAGUE_RE.match(subj) and body:
         subj = body.splitlines()[0].strip()
-
-    if _LESSON_RE.match(subj):
-        return {"type": "lesson", "title": subj, "source": "commit",
-                "ref": commit["sha"][:8],
-                "fields": {"takeaway": subj, "trigger": body or subj}}  # root_cause left empty
-    if _SUPERSESSION_RE.match(subj):
-        return {"type": "decision", "title": subj, "source": "commit",
-                "ref": commit["sha"][:8], "is_supersession": True,
-                "fields": {"choice": subj, "rationale": body or subj}}
-    if _ADOPTION_RE.match(subj) or _CONSTRAINT_RE.search(subj):
-        return {"type": "decision", "title": subj, "source": "commit",
-                "ref": commit["sha"][:8],
-                "fields": {"choice": subj, "rationale": body or subj}}
-    return None
+    return _typed(subj, body, "commit", commit["sha"][:8])
 
 
 def _llm_proposal(commit, proposer):
