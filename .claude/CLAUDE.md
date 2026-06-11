@@ -41,8 +41,8 @@ mypm validate [--errors-only]               run the build/lint pass (warnings gr
 ```
 
 Set `MYPM_GLOBAL_ROOT` to a shared knowledge repo and its global-scope nodes
-(patterns, preferences) join every recall here — knowledge compounding across
-repositories.
+(patterns, preferences) join every recall here — the mechanism for knowledge
+to compound across repositories.
 
 ## Knowledge layout
 
@@ -65,4 +65,5 @@ The index at `knowledge/.index/` is a derived cache — gitignored and rebuildab
 - `.claude/architecture/` — full architecture documentation
 
 **The Golden Loop**: Recall → Reason → Capture → Distill → repeat.
-Knowledge that enters the loop compounds across every project that follows.
+Knowledge that enters the loop is meant to compound across every project
+that follows — the bet this tool exists to test.

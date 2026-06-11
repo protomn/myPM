@@ -2,6 +2,17 @@
 
 **A git-native memory layer for engineers working with AI.**
 
+> **Status: beta.** The machinery works and is tested (196 tests, the loop
+> runs end-to-end, this repo dogfoods itself) — but the *thesis* of this tool
+> is that persistent, gated memory makes AI-assisted engineering measurably
+> better over time, and that is exactly the kind of claim that can't be proven
+> by its author on day one. myPM ships with its own instrumentation
+> (`mypm stats`: time-to-approve, recall win rate, citation rate) so the
+> thesis gets tested by use, not asserted by a README. If you try it, the most
+> valuable thing you can send back is real usage — what stalled, what
+> surprised you, and your `mypm stats` after a couple of weeks:
+> [open an issue](https://github.com/protomn/myPM/issues).
+
 > Looking for the how-to? **[USAGE.md](USAGE.md)** is the complete usage
 > guide — setup on fresh and existing repos, every command and flag, the
 > knowledge model, Claude Code integration, and day-to-day workflows. This
@@ -37,7 +48,7 @@ A typed knowledge graph that lives in your git repository.
 
 Not a notes app. Not a second brain. Not a chat interface. A structured store of engineering knowledge — decisions, lessons, components, patterns, preferences — organized so that an AI can retrieve the most relevant slice at the moment it needs to reason.
 
-The graph persists across sessions. It compounds across projects. It is owned by you, versioned with your code, and readable with `cat`.
+The graph persists across sessions. It is built to compound across projects — a lesson promoted in one repo recalled in the next — which is the bet this tool exists to test, not a result it can yet claim. It is owned by you, versioned with your code, and readable with `cat`.
 
 ---
 
@@ -132,8 +143,9 @@ mypm migrate
 
 ## Quick start
 
-**Bootstrap** — seed the graph from history you already have. Day-1 Recall
-should never be empty:
+**Bootstrap** — seed the graph from history you already have, so day-1 recall
+doesn't start empty (how much it yields depends on your commit style — the
+free pass is deliberately conservative, and says so when it keeps little):
 
 ```bash
 mypm bootstrap --limit 100 --write          # scan recent commits, preview first without --write
@@ -173,7 +185,8 @@ mypm distill
 ```
 
 **Review** — the per-draft approval surface. `distill` is batch; `review` is how
-you work through what it blocked, in seconds per item:
+you work through what it blocked. The design target is seconds per item —
+`mypm review stats` measures whether that's actually true for you:
 
 ```bash
 mypm review                                  # interactive: walk pending drafts
@@ -243,9 +256,10 @@ what promotion costs (review telemetry) and whether recall earns its keep
 **Cross-repository knowledge** — point `MYPM_GLOBAL_ROOT` at a shared
 knowledge repo (one `mypm init` there, committed and pulled like any repo).
 Its global-scope nodes — patterns, preferences — join every local recall;
-other repositories' project scopes never leak. This is the compounding loop:
-a lesson learned in one repo, promoted to a global pattern, recalled in the
-next repo on day one.
+other repositories' project scopes never leak. This is the compounding loop
+the tool is trying to create: a lesson learned in one repo, promoted to a
+global pattern, recalled in the next repo on day one. The mechanism ships and
+is tested; whether it compounds in *your* practice is the experiment.
 
 **Council** — EXPERIMENTAL: run the agent doctrines as sequential Claude calls (requires `mypm[ai]` + `ANTHROPIC_API_KEY`; one full recall + completion per agent — mind the bill). The doctrines also work as plain Claude Code subagents, which is the supported path:
 
@@ -269,9 +283,9 @@ mypm capture-pr          # or run it manually against HEAD
 `.claude/agents/` are dual-runtime: valid Claude Code **subagents** (frontmatter
 with name/description/tools) *and* the system prompts `mypm council` runs via
 the API. Under either runtime, an agent ends its reply with a fenced
-`mypm-capture` block per durable finding. Capture is then **guaranteed, not
-hoped for**: `mypm init` installs `.claude/settings.json` with `Stop` and
-`SubagentStop` hooks that run `mypm observe` — it scans the session transcript
+`mypm-capture` block per durable finding. Capture then stops depending on the
+model remembering to run a command: `mypm init` installs `.claude/settings.json`
+with `Stop` and `SubagentStop` hooks that run `mypm observe` — it scans the session transcript
 for capture blocks, dedups them against the graph (Recall as the capture
 filter), and writes survivors to the inbox. Content-addressed observation ids
 make re-scans idempotent; outside a myPM repo the hook is a silent no-op. The
@@ -358,18 +372,29 @@ Schema validation, edge legality, referential integrity, acyclicity, near-duplic
 
 ---
 
-## Current state
+## Current state: beta
 
 v0.1 was the substrate, v0.2 the reasoning layer, v0.3 the extraction core and
-the approval surface. The full loop now closes end to end: `mypm bootstrap`
-seeds candidates from history you already have, the gates hold them to the same
-standard as manual capture, `mypm review` is how a human moves them through
-Gate 2 in seconds per item, and `mypm retrieve` recalls the result. Day-1 is
-not empty, and nothing enters the active graph without an author.
+the approval surface, v0.4 the compounding graph. The full loop closes end to
+end: `mypm bootstrap` seeds candidates from history, the gates hold them to
+the same standard as manual capture, `mypm review` moves them through Gate 2,
+and `mypm retrieve`/`mypm orient` recall the result. Nothing enters the
+active graph without an author.
+
+**What's tested and true today** (196 tests; this repo runs myPM on itself):
 
 - **Recall** blends a lexical seed with optional semantic embeddings, then ranks by relevance, centrality, recency, and agent-role fit. The index detects when files changed under it and rebuilds itself.
-- **Capture** is abundant: bootstrap over git history, a post-merge hook for PRs, an LLM proposer at Gate 1 — all landing in the inbox, never in the graph.
+- **Capture** is abundant: bootstrap over git history, a post-merge hook for PRs, the live observer on session end, an LLM proposer at Gate 1 — all landing in the inbox, never in the graph.
 - **Promotion** is scarce: Gate 2 demands substantiation and a graph link, and `mypm review` is the human's tool for supplying exactly what's missing.
-- **Reason** runs the agent doctrines in `.claude/` as real Claude calls — `mypm council` recalls each agent's ContextBundle, reasons under its doctrine, and returns drafts for you to author.
+- Every AI-backed path is an optional extra that falls back to the deterministic substrate when no key or dependency is present — the files stay the database, and the system runs offline.
 
-Every AI-backed path is an optional extra that falls back to the deterministic substrate when no key or dependency is present — the files stay the database, and the system still runs offline.
+**What's still a hypothesis** — the reason this is a beta, and instrumented
+rather than asserted:
+
+- That the graph beats a well-kept CLAUDE.md once it grows past a flat file (`mypm feedback` + the recall win rate exist to find out).
+- That enrichment turns minutes-per-draft review into seconds (`mypm review stats` measures the two cohorts).
+- That knowledge actually compounds across repositories in practice, not just in the mechanism (`MYPM_GLOBAL_ROOT` ships; the longitudinal evidence doesn't yet).
+- That recalled knowledge gets *used* — the Stop hook detects citations of recalled nodes so the answer is observable.
+
+If you run the beta, that instrumentation is the feedback I'm asking for:
+two weeks of real use and your `mypm stats` output say more than any review.

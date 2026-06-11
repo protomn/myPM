@@ -183,7 +183,8 @@ merges as plain text.
 ## 4. Setup on an existing repo
 
 An existing repo has history worth mining. Same `init`, then **bootstrap** the
-graph from your git log so day-1 recall is never empty.
+graph from your git log so day-1 recall doesn't start empty (yield depends on
+your commit style; an unproductive run explains itself and offers `--enrich`).
 
 ```bash
 cd your-existing-repo
@@ -219,8 +220,9 @@ Most bootstrapped drafts will be missing their substantiation fields (a commit
 message rarely states `root_cause` or `alternatives` honestly). You have two
 ways to fill them:
 
-- **By hand**, in seconds per draft, via `mypm review` (interactive) or
-  `mypm review approve <id> --field ...`.
+- **By hand**, via `mypm review` (interactive) or
+  `mypm review approve <id> --field ...` — designed for seconds per draft;
+  `mypm review stats` tells you what it actually costs you.
 - **By a Claude Code session**, via the `/enrich-drafts` slash command: it
   reads each draft's source commit (`git show <sha>` — the sha is in every
   draft's provenance), fills fields with what the diff actually evidences, and
@@ -656,8 +658,9 @@ The live observer closes the loop on AI sessions. The contract:
    against the graph (Recall as the capture filter), and writes the survivors
    to the inbox.
 
-Capture is thereby **guaranteed, not hoped for** — it doesn't depend on the
-model remembering to run a command. Observation ids are content-addressed, so
+Capture thereby stops depending on the model remembering to run a command —
+the hook fires either way, and `mypm doctor` verifies the wiring actually
+resolves on your machine. Observation ids are content-addressed, so
 re-scanning the same transcript is idempotent. Outside a myPM repo the hook is
 a silent no-op, and it always exits 0 so it can never block a session from
 stopping.
@@ -731,7 +734,7 @@ may **retrieve**, **capture**, and **fill**; only you **approve**.
 | Variable | Effect |
 |---|---|
 | `MYPM_ROOT` | knowledge root to use when no `--root` flag is given (beats walk-up discovery) |
-| `MYPM_GLOBAL_ROOT` | a **shared** knowledge root (its own repo, created with `mypm init`); its global-scope nodes — patterns, preferences — join every local `retrieve`/`orient`/`search`/`show`. Local nodes win id collisions; other repos' project scopes never leak. This is how knowledge compounds across repositories. |
+| `MYPM_GLOBAL_ROOT` | a **shared** knowledge root (its own repo, created with `mypm init`); its global-scope nodes — patterns, preferences — join every local `retrieve`/`orient`/`search`/`show`. Local nodes win id collisions; other repos' project scopes never leak. This is the mechanism by which knowledge is meant to compound across repositories. |
 | `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` | enables the LLM paths (proposer, `bootstrap --enrich`, council) |
 | `MYPM_NO_LLM=1` | force-disable all LLM paths even if a key is present (used by tests/CI) |
 | `MYPM_CLAUDE_MODEL` | override the default model (`claude-opus-4-8`) for LLM paths |
@@ -783,7 +786,7 @@ approve:
 
 ```
 /enrich-drafts            (in Claude Code)
-mypm review               (you: approve/reject in seconds per draft)
+mypm review               (you: approve/reject each draft, evidence shown inline)
 mypm review stats         (did enrichment actually save time?)
 ```
 
