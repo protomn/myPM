@@ -20,3 +20,4 @@
 /mypm/schemas/__pycache__/
 /tmp/kfb/.index/
 .claude/settings.json
+/dist/
